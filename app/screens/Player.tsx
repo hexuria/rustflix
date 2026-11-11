@@ -6,7 +6,7 @@
 // playback controls, filters as you type, and ⌘1–⌘9 pick items.
 
 import { computed, effect, platform, signal, Text, View, WebView } from "nsh";
-import { Slider } from "nsh/base";
+import { Dialog, Slider } from "nsh/base";
 import { goBack, route } from "../lib/router";
 import {
   cancelDownload,
@@ -124,8 +124,11 @@ function MobileControls() {
     const ss = seasons();
     return ss.indexOf(p.season ?? 1) > 0;
   });
+  // Native Liquid Glass on iOS 26+ (glassEffect); backdrop-blur is the
+  // fallback the style draws on older systems.
   const ctlBtn =
-    "flex-row items-center justify-center rounded-full bg-white/10 px-3 py-2 active:bg-white/25";
+    "flex-row items-center justify-center rounded-full bg-white/10 px-4 py-3 backdrop-blur-md active:bg-white/25";
+  const glass = { glassEffect: "regular" } as never;
   return (
     <View class="absolute inset-0">
       {/* Tap layer: owns every touch so the chrome can auto-hide; the
@@ -146,11 +149,12 @@ function MobileControls() {
                 goBack();
               }}
               class={ctlBtn}
+              style={glass}
             >
-              <Text class="text-lg font-bold text-white">‹</Text>
+              <Text class="text-xl font-bold text-white">‹</Text>
             </View>
             <Text
-              class="flex-1 text-sm font-semibold text-white"
+              class="flex-1 text-base font-semibold text-white"
               style={{ numberOfLines: 1 }}
             >
               {r()?.title ?? ""}
@@ -162,13 +166,14 @@ function MobileControls() {
                 showSources.set(!showSources());
               }}
               class={ctlBtn}
+              style={glass}
             >
-              <Text class="text-sm font-bold text-white">⇄</Text>
+              <Text class="text-lg font-bold text-white">⇄</Text>
             </View>
           </View>
-          <View class="absolute inset-x-0 bottom-0 flex-col gap-2 bg-black/60 px-4 pb-5 pt-10">
+          <View class="absolute inset-x-0 bottom-0 flex-col gap-3 bg-black/60 px-4 pb-6 pt-12">
             <View class="flex-row items-center gap-3">
-              <Text class="w-10 text-right text-[11px] font-medium text-zinc-300">
+              <Text class="w-12 text-right text-xs font-medium text-zinc-300">
                 {fmtTime(position())}
               </Text>
               <Slider
@@ -182,16 +187,16 @@ function MobileControls() {
                 }}
                 accessibilityLabel="Seek"
                 class="flex-1"
-                trackClass="h-8 flex-1 justify-center px-2.5"
+                trackClass="h-9 flex-1 justify-center px-3"
                 indicatorClass="h-2 rounded-full bg-white/25"
                 rangeClass="h-full rounded-full bg-red-600"
-                thumbClass="h-5 w-5 rounded-full bg-white"
+                thumbClass="h-6 w-6 rounded-full bg-white"
               />
-              <Text class="w-10 text-[11px] font-medium text-zinc-300">
+              <Text class="w-12 text-xs font-medium text-zinc-300">
                 {fmtTime(dur())}
               </Text>
             </View>
-            <View class="flex-row items-center gap-2">
+            <View class="flex-row items-center justify-center gap-3">
               <If when={canPrev()}>
                 <View
                   role="button"
@@ -200,21 +205,45 @@ function MobileControls() {
                     void prevEpisode();
                   }}
                   class={ctlBtn}
+                  style={glass}
                 >
-                  <Text class="text-base text-white">⏮</Text>
+                  <Text class="text-xl text-white">⏮</Text>
                 </View>
               </If>
               <View
                 role="button"
                 onPress={() => {
                   pokeControls();
+                  seekBy(-10);
+                }}
+                class={ctlBtn}
+                style={glass}
+              >
+                <Text class="text-sm font-bold text-white">−10s</Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
                   togglePlay();
                 }}
-                class="flex-row items-center justify-center rounded-full bg-white/10 px-4 py-2 active:bg-white/25"
+                class="flex-row items-center justify-center rounded-full bg-white/15 px-6 py-3.5 backdrop-blur-md active:bg-white/30"
+                style={glass}
               >
-                <Text class="text-lg font-bold text-white">
+                <Text class="text-2xl font-bold text-white">
                   {paused() ? "▶" : "⏸"}
                 </Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  seekBy(10);
+                }}
+                class={ctlBtn}
+                style={glass}
+              >
+                <Text class="text-sm font-bold text-white">+10s</Text>
               </View>
               <If when={canNext()}>
                 <View
@@ -224,30 +253,23 @@ function MobileControls() {
                     void nextEpisode();
                   }}
                   class={ctlBtn}
+                  style={glass}
                 >
-                  <Text class="text-base text-white">⏭</Text>
+                  <Text class="text-xl text-white">⏭</Text>
                 </View>
               </If>
-              <View class="flex-1" />
+            </View>
+            <View class="flex-row items-center justify-center gap-3">
               <View
                 role="button"
                 onPress={() => {
                   pokeControls();
-                  seekBy(-10);
+                  showSources.set(!showSources());
                 }}
                 class={ctlBtn}
+                style={glass}
               >
-                <Text class="text-xs font-bold text-white">−10s</Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  seekBy(10);
-                }}
-                class={ctlBtn}
-              >
-                <Text class="text-xs font-bold text-white">+10s</Text>
+                <Text class="text-base font-bold text-white">⇄ Sources</Text>
               </View>
               <View
                 role="button"
@@ -256,8 +278,9 @@ function MobileControls() {
                   enterFullscreen();
                 }}
                 class={ctlBtn}
+                style={glass}
               >
-                <Text class="text-sm font-bold text-white">⛶</Text>
+                <Text class="text-lg font-bold text-white">⛶</Text>
               </View>
               <View
                 role="button"
@@ -266,8 +289,9 @@ function MobileControls() {
                   openPalette();
                 }}
                 class={ctlBtn}
+                style={glass}
               >
-                <Text class="text-sm font-bold text-white">⋯</Text>
+                <Text class="text-lg font-bold text-white">⋯</Text>
               </View>
             </View>
           </View>
@@ -300,7 +324,11 @@ export function Player() {
   // on the same keys: the native web view keeps first responder (GPUI's
   // blur() cannot resign it), so the bridge swallows keys page-side.
   effect(() => {
-    setPageKeysBlocked(showPalette() || showSources());
+    const open = showPalette() || showSources();
+    setPageKeysBlocked(open);
+    // A modal owns the screen: when it closes, the touch chrome stays
+    // hidden until the next tap instead of reappearing over the video.
+    if (open) controlsVisible.set(false);
   });
 
   // Back from native fullscreen (AVPlayerViewController's Done), the
@@ -403,14 +431,11 @@ export function Player() {
   return (
     <View class="flex-1 bg-black">
       <View class="flex-1 flex-col">
-        {/* Video area: shrunk while an overlay card is open so the card
-            can sit in-flow (the WebView itself stays mounted). It must
-            NOT collapse to zero — a hidden/zero-size web view suspends
-            page JS, which kills the bridge's reports and commands. */}
-        <View
-          class={overlay() ? "overflow-hidden" : "flex-1"}
-          style={overlay() ? { height: "44%" } : undefined}
-        >
+        {/* Video area: the palette and source picker are modal dialogs
+            in their own layer, so the video keeps its full size behind
+            them and never collapses (a hidden/zero-size web view would
+            suspend page JS and kill the bridge's reports). */}
+        <View class="flex-1">
           <If when={src()}>
             {(u) => (
               <WebView
@@ -449,137 +474,168 @@ export function Player() {
           </If>
         </View>
 
-        {/* Floating cards: fixed width, fixed height, scrollable list. */}
-        <If when={overlay()}>
-          <View class="flex-1 items-center justify-center bg-black p-8">
-            <If when={showPalette()}>
+        {/* Palette and sources are real modal dialogs: their own layer
+            floats over the video, the backdrop dims it, and a tap/click
+            away (Escape on desktop, a sheet swipe on iOS) dismisses them
+            while playback continues behind. */}
+        <Dialog
+          open={showPalette()}
+          onOpenChange={({ open }) => {
+            if (!open) closePalette();
+          }}
+          animation="fade"
+          backdropStyle={{ backgroundColor: "rgba(0,0,0,0.6)" }}
+          presentation="fullScreen"
+          style={{
+            alignSelf: "center",
+            marginVertical: "auto",
+            width: platform.desktop ? (paletteWidth ?? "92%") : "92%",
+            height: platform.desktop ? "62%" : "60%",
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor: "#27272a",
+            overflow: "hidden",
+            backgroundColor: "#18181b",
+          }}
+        >
+          <View class="flex-1 flex-col">
+            <View class="flex-row items-center gap-2 border-b border-zinc-800 px-4 py-3">
+              <Text class="text-sm font-bold text-zinc-100">
+                {paletteViewTitle()}
+              </Text>
+              <View class="flex-1" />
+              <If when={platform.desktop}>
+                <Text class="text-[11px] text-zinc-600">esc</Text>
+              </If>
               <View
-                class="flex flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900"
-                style={{ width: paletteWidth ?? "92%", height: "62%" }}
+                role="button"
+                onPress={closePalette}
+                class="rounded-md px-2 py-1 active:bg-zinc-800"
               >
-                <View class="flex-row items-center gap-2 border-b border-zinc-800 px-4 py-3">
-                  <Text class="text-sm font-bold text-zinc-100">
-                    {paletteViewTitle()}
-                  </Text>
-                  <View class="flex-1" />
-                  <If when={platform.desktop}>
-                    <Text class="text-[11px] text-zinc-600">esc</Text>
-                  </If>
-                  <View
-                    role="button"
-                    onPress={closePalette}
-                    class="rounded-md px-2 py-1 active:bg-zinc-800"
-                  >
-                    <Text class="text-sm font-bold text-zinc-400">✕</Text>
-                  </View>
-                </View>
-                {/* The palette owns the keyboard through keymap bindings
-                    (bound on open, removed on close) — no text field, so
-                    Escape and every printable key reach it. On touch
-                    devices there is no keyboard: the list is tapped. */}
-                <If when={paletteView() === "root" && platform.desktop}>
-                  <View class="mx-3 mb-2 mt-1 flex-row items-center rounded-lg border border-zinc-800 bg-zinc-950 px-3"
-                    style={{ height: 40 }}
-                  >
-                    <If when={!paletteQuery()}>
-                      <Text class="text-sm text-zinc-500">Type to filter…</Text>
-                    </If>
-                    <Text class="flex-1 text-sm text-zinc-100">{paletteQuery()}</Text>
-                    <If when={platform.desktop}>
-                      <Text class="text-[11px] text-zinc-600">↵</Text>
-                    </If>
-                  </View>
+                <Text class="text-sm font-bold text-zinc-400">✕</Text>
+              </View>
+            </View>
+            {/* The palette owns the keyboard through keymap bindings
+                (bound on open, removed on close) — no text field, so
+                Escape and every printable key reach it. On touch
+                devices there is no keyboard: the list is tapped. */}
+            <If when={paletteView() === "root" && platform.desktop}>
+              <View class="mx-3 mb-2 mt-1 flex-row items-center rounded-lg border border-zinc-800 bg-zinc-950 px-3"
+                style={{ height: 40 }}
+              >
+                <If when={!paletteQuery()}>
+                  <Text class="text-sm text-zinc-500">Type to filter…</Text>
                 </If>
-                <View class="flex-1 overflow-y-auto p-1.5">
-                  <Each of={paletteRows()}>
-                    {(row) => (
-                      <>
-                        <If when={row().kind === "header"}>
-                          <Text class="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-                            {row().label}
-                          </Text>
-                        </If>
-                        <If when={row().kind === "item"}>
-                          <View
-                            role="button"
-                            onPress={() => {
-                              const id = row().id;
-                              if (id) paletteSelect(id);
-                            }}
-                            class="mx-1 flex-row items-center gap-2 rounded-lg px-3 py-2 active:bg-zinc-800"
-                          >
-                            <If when={platform.desktop && (row().num ?? 99) <= 9}>
-                              <Text class="w-6 text-[11px] font-bold text-zinc-600">
-                                ⌘{row().num}
-                              </Text>
-                            </If>
-                            <Text class="flex-1 text-sm text-zinc-100">
-                              {row().label}
-                            </Text>
-                            <If when={row().checked}>
-                              <Text class="text-sm text-red-500">✓</Text>
-                            </If>
-                          </View>
-                        </If>
-                      </>
-                    )}
-                  </Each>
-                  <If when={paletteRows().length === 0}>
-                    <Text class="p-4 text-sm text-zinc-500">No matches</Text>
-                  </If>
-                </View>
+                <Text class="flex-1 text-sm text-zinc-100">{paletteQuery()}</Text>
+                <If when={platform.desktop}>
+                  <Text class="text-[11px] text-zinc-600">↵</Text>
+                </If>
               </View>
             </If>
-
-            <If when={showSources()}>
-              <View
-                class="flex flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900"
-                style={{ width: sourcesWidth ?? "92%", height: "55%" }}
-              >
-                <View class="flex-row items-center border-b border-zinc-800 px-4 py-3">
-                  <Text class="flex-1 text-sm font-bold text-zinc-100">Sources</Text>
-                  <View
-                    role="button"
-                    onPress={() => showSources.set(false)}
-                    class="rounded-md px-2 py-1 active:bg-zinc-800"
-                  >
-                    <Text class="text-sm font-bold text-zinc-400">✕</Text>
-                  </View>
-                </View>
-                <View class="flex-1 overflow-y-auto p-1.5">
-                  <Each of={sourcesFor((r()?.type ?? "movie") as MediaType)}>
-                    {(s) => (
+            <View class="flex-1 overflow-y-auto p-1.5">
+              <Each of={paletteRows()}>
+                {(row) => (
+                  <>
+                    <If when={row().kind === "header"}>
+                      <Text class="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                        {row().label}
+                      </Text>
+                    </If>
+                    <If when={row().kind === "item"}>
                       <View
                         role="button"
-                        onPress={() => pickSource(s().id)}
+                        onPress={() => {
+                          const id = row().id;
+                          if (id) paletteSelect(id);
+                        }}
                         class="mx-1 flex-row items-center gap-2 rounded-lg px-3 py-2 active:bg-zinc-800"
                       >
-                        <View class="flex-1">
-                          <Text class="text-sm font-medium text-zinc-100">
-                            {s().label}
+                        <If when={platform.desktop && (row().num ?? 99) <= 9}>
+                          <Text class="w-6 text-[11px] font-bold text-zinc-600">
+                            ⌘{row().num}
                           </Text>
-                          <If when={NEEDS_INTERCEPT.includes(s().id)}>
-                            <Text class="text-[11px] text-amber-500">
-                              may not load
-                            </Text>
-                          </If>
-                        </View>
-                        <If when={s().note}>
-                          {(n) => (
-                            <Text class="text-xs text-zinc-500">{n()}</Text>
-                          )}
                         </If>
-                        <If when={sourceId() === s().id}>
+                        <Text class="flex-1 text-sm text-zinc-100">
+                          {row().label}
+                        </Text>
+                        <If when={row().checked}>
                           <Text class="text-sm text-red-500">✓</Text>
                         </If>
                       </View>
-                    )}
-                  </Each>
-                </View>
-              </View>
-            </If>
+                    </If>
+                  </>
+                )}
+              </Each>
+              <If when={paletteRows().length === 0}>
+                <Text class="p-4 text-sm text-zinc-500">No matches</Text>
+              </If>
+            </View>
           </View>
-        </If>
+        </Dialog>
+
+        <Dialog
+          open={showSources()}
+          onOpenChange={({ open }) => {
+            if (!open) showSources.set(false);
+          }}
+          animation="fade"
+          backdropStyle={{ backgroundColor: "rgba(0,0,0,0.6)" }}
+          presentation="fullScreen"
+          style={{
+            alignSelf: "center",
+            marginVertical: "auto",
+            width: platform.desktop ? (sourcesWidth ?? "92%") : "92%",
+            height: platform.desktop ? "55%" : "60%",
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor: "#27272a",
+            overflow: "hidden",
+            backgroundColor: "#18181b",
+          }}
+        >
+          <View class="flex-1 flex-col">
+            <View class="flex-row items-center border-b border-zinc-800 px-4 py-3">
+              <Text class="flex-1 text-sm font-bold text-zinc-100">Sources</Text>
+              <View
+                role="button"
+                onPress={() => showSources.set(false)}
+                class="rounded-md px-2 py-1 active:bg-zinc-800"
+              >
+                <Text class="text-sm font-bold text-zinc-400">✕</Text>
+              </View>
+            </View>
+            <View class="flex-1 overflow-y-auto p-1.5">
+              <Each of={sourcesFor((r()?.type ?? "movie") as MediaType)}>
+                {(s) => (
+                  <View
+                    role="button"
+                    onPress={() => pickSource(s().id)}
+                    class="mx-1 flex-row items-center gap-2 rounded-lg px-3 py-2 active:bg-zinc-800"
+                  >
+                    <View class="flex-1">
+                      <Text class="text-sm font-medium text-zinc-100">
+                        {s().label}
+                      </Text>
+                      <If when={NEEDS_INTERCEPT.includes(s().id)}>
+                        <Text class="text-[11px] text-amber-500">
+                          may not load
+                        </Text>
+                      </If>
+                    </View>
+                    <If when={s().note}>
+                      {(n) => (
+                        <Text class="text-xs text-zinc-500">{n()}</Text>
+                      )}
+                    </If>
+                    <If when={sourceId() === s().id}>
+                      <Text class="text-sm text-red-500">✓</Text>
+                    </If>
+                  </View>
+                )}
+              </Each>
+            </View>
+          </View>
+        </Dialog>
       </View>
 
       {/* Bottom bar (desktop): transport controls + download status +

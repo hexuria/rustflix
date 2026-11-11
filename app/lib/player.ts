@@ -1533,6 +1533,10 @@ export interface AutotestConfig {
   source?: string;
   settleMs?: number;
   actions?: string[];
+  // "home" | "search" | "library" | "settings" | "setup" | "title" |
+  // "player" (default when type+id are given). For "title", type+id pick
+  // the title page; for "player" they pick the video.
+  screen?: string;
 }
 
 const autotestWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1540,7 +1544,18 @@ const autotestWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export async function runAutotest(cfg: AutotestConfig) {
   debug("autotest: start", cfg);
   if (cfg.source) sourceId.set(cfg.source);
-  if (cfg.type && cfg.id) {
+  const screen = cfg.screen ?? (cfg.type && cfg.id ? "player" : "home");
+  if (screen === "title" && cfg.type && cfg.id) {
+    navigate({ name: "title", type: cfg.type, id: cfg.id });
+  } else if (screen === "search") {
+    navigate({ name: "search" });
+  } else if (screen === "library") {
+    navigate({ name: "library" });
+  } else if (screen === "settings") {
+    navigate({ name: "settings" });
+  } else if (screen === "setup") {
+    navigate({ name: "setup" });
+  } else if (screen === "player" && cfg.type && cfg.id) {
     navigate({
       name: "player",
       type: cfg.type,

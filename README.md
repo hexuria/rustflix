@@ -59,10 +59,9 @@ cd <nsh checkout> && cargo xtask ios-embed --no-dev
 # 2. rustflix bundle -> ios/Rustflix/nsh/
 ./ios/sync-bundle.sh
 
-# 3. Xcode project (xcodegen) and build
-cd ios && xcodegen generate
-xcodebuild -project rustflix.xcodeproj -scheme rustflix \
-  -destination 'platform=iOS Simulator,name=iPhone 16' build
+# 3. Xcode project (xcodegen) and build — ./ios/build.sh does all of
+#    steps 2+3 and picks an available iPhone simulator automatically
+./ios/build.sh            # or: ./ios/build.sh 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 `ios/project.yml` points at the xcframework in the NSH checkout;

@@ -24,7 +24,7 @@ targets:
         PRODUCT_NAME: rustflix
         # App Store requires both; bump CURRENT_PROJECT_VERSION per upload.
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "8"
+        CURRENT_PROJECT_VERSION: "9"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: rustflix
         INFOPLIST_KEY_UILaunchScreen_Generation: YES

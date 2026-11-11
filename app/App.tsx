@@ -3,6 +3,7 @@
 
 import { computed, effect, keymap, mount, platform, signal, Storage, Text, View } from "nsh";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
+import { Dialog } from "nsh/base";
 import { TabBar } from "nsh/mobile";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { canGoBack, canGoForward, goBack, goForward, navigate, route } from "./lib/router";
@@ -142,7 +143,16 @@ function MobileShell() {
   );
   return (
     <View class="flex-1 flex-col bg-background">
-      <View class="flex-1">
+      {/* Keep interactive content clear of the status bar, the notch
+          and the home indicator (0 everywhere they do not apply). */}
+      <View
+        class="flex-1"
+        style={{
+          paddingTop: "env(safe-area-inset-top)",
+          paddingLeft: "env(safe-area-inset-left)",
+          paddingRight: "env(safe-area-inset-right)",
+        }}
+      >
         <SwitchScreen />
       </View>
       <If when={showBar()}>
@@ -217,7 +227,29 @@ function SwitchScreen() {
         <Title />
       </If>
       <If when={r()?.name === "player"}>
-        <Player />
+        {/* On touch devices the player lives in a fullscreen dialog:
+            its layer sits above the tab bar and gives the video the whole
+            screen. Landscape comes from the video's own fullscreen
+            (AVPlayerViewController rotates itself); the dialog's
+            orientation mask is a hint iOS 16+ may ignore. */}
+        <If
+          when={platform.desktop}
+          else={
+            <Dialog
+              open
+              class="absolute inset-0 bg-black"
+              presentation="fullScreen"
+              ios={{ supportedOrientations: ["landscape", "landscape-left", "landscape-right"] }}
+              closeOnEscape={false}
+              closeOnBackdropPress={false}
+              closeOnSwipe={false}
+            >
+              <Player />
+            </Dialog>
+          }
+        >
+          <Player />
+        </If>
       </If>
     </>
   );

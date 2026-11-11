@@ -5,7 +5,8 @@
 // card takes the space. Cmd+K toggles the palette; it lists episodes and
 // playback controls, filters as you type, and ⌘1–⌘9 pick items.
 
-import { computed, effect, platform, Text, View, WebView } from "nsh";
+import { computed, effect, platform, signal, Text, View, WebView } from "nsh";
+import { Slider } from "nsh/base";
 import { goBack, route } from "../lib/router";
 import {
   cancelDownload,
@@ -14,18 +15,27 @@ import {
   episodes,
   extLoading,
   loadEpisodes,
+  mediaFullscreen,
+  mediaPaused,
   nextEpisode,
   onPlayerMessage,
+  openPalette,
   paletteQuery,
   paletteRows,
   paletteSelect,
   paletteView,
   paletteViewTitle,
   pickSource,
+  playPlayback,
+  enterFullscreen,
+  position,
+  duration,
   armBridge,
   PLAYER_BRIDGE,
   playerRoute,
   playerUrl,
+  prevEpisode,
+  seekTo,
   setPageKeysBlocked,
   showPalette,
   showSources,
@@ -33,7 +43,7 @@ import {
   sourceId,
   startPlayer,
   stopPlayer,
-  togglePalette,
+  togglePlay,
   webview,
 } from "../lib/player";
 import { NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
@@ -43,6 +53,225 @@ import { NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
 // startPlayer/armResume would re-fire constantly and the resume seek
 // would keep resetting the video (the 9:43 loop).
 let handledRoute = "";
+
+// --- Touch controls ---------------------------------------------------------
+//
+// iOS composites native views in tree order, so this overlay really draws
+// over the WKWebView (the GPUI desktop backend cannot: its web view is a
+// native child above all GPUI content). A full-area tap layer owns every
+// touch — the embed's own controls stay unreachable underneath — and the
+// chrome auto-hides a few seconds after the last interaction.
+const controlsVisible = signal(true);
+const seekDrag = signal<number | null>(null);
+let hideTimer: ReturnType<typeof setTimeout> | undefined;
+
+function pokeControls() {
+  controlsVisible.set(true);
+  if (hideTimer) clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => controlsVisible.set(false), 4000);
+}
+
+function tapControls() {
+  if (controlsVisible()) {
+    controlsVisible.set(false);
+    if (hideTimer) clearTimeout(hideTimer);
+  } else {
+    pokeControls();
+  }
+}
+
+function fmtTime(sec: number): string {
+  if (!isFinite(sec) || sec < 0) return "0:00";
+  const s = Math.floor(sec % 60);
+  const m = Math.floor(sec / 60) % 60;
+  const h = Math.floor(sec / 3600);
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+}
+
+function MobileControls() {
+  const r = computed(() => playerRoute());
+  const paused = computed(() => mediaPaused());
+  const dur = computed(() => duration());
+  const pct = computed(() => {
+    const drag = seekDrag();
+    if (drag != null) return drag;
+    const d = duration();
+    return d > 0 ? Math.min(100, (position() / d) * 100) : 0;
+  });
+  const canNext = computed(() => {
+    const p = r();
+    if (!p || p.type === "movie") return false;
+    const cur = p.episode ?? 1;
+    const eps = episodes();
+    const i = eps.findIndex((e) => e.n === cur);
+    if (i >= 0 && i + 1 < eps.length) return true;
+    if (p.type === "anime") return false;
+    const ss = seasons();
+    const si = ss.indexOf(p.season ?? 1);
+    return si >= 0 && si + 1 < ss.length;
+  });
+  const canPrev = computed(() => {
+    const p = r();
+    if (!p || p.type === "movie") return false;
+    if ((p.episode ?? 1) > 1) return true;
+    if (p.type === "anime") return false;
+    const ss = seasons();
+    return ss.indexOf(p.season ?? 1) > 0;
+  });
+  const ctlBtn =
+    "flex-row items-center justify-center rounded-full bg-white/10 px-3 py-2 active:bg-white/25";
+  return (
+    <View class="absolute inset-0">
+      {/* Tap layer: owns every touch so the chrome can auto-hide; the
+          embed's own controls stay unreachable underneath it. The near-
+          transparent background keeps it a real hit target. */}
+      <View
+        class="absolute inset-0"
+        style={{ backgroundColor: "rgba(0,0,0,0.01)" }}
+        onPress={tapControls}
+      />
+      <If when={controlsVisible() && !mediaFullscreen()}>
+        <>
+          <View class="absolute inset-x-0 top-0 flex-row items-center gap-2 bg-black/60 px-3 pb-8 pt-3">
+            <View
+              role="button"
+              onPress={() => {
+                pokeControls();
+                goBack();
+              }}
+              class={ctlBtn}
+            >
+              <Text class="text-lg font-bold text-white">‹</Text>
+            </View>
+            <Text
+              class="flex-1 text-sm font-semibold text-white"
+              style={{ numberOfLines: 1 }}
+            >
+              {r()?.title ?? ""}
+            </Text>
+            <View
+              role="button"
+              onPress={() => {
+                pokeControls();
+                showSources.set(!showSources());
+              }}
+              class={ctlBtn}
+            >
+              <Text class="text-sm font-bold text-white">⇄</Text>
+            </View>
+          </View>
+          <View class="absolute inset-x-0 bottom-0 flex-col gap-2 bg-black/60 px-4 pb-5 pt-10">
+            <View class="flex-row items-center gap-3">
+              <Text class="w-10 text-right text-[11px] font-medium text-zinc-300">
+                {fmtTime(position())}
+              </Text>
+              <Slider
+                value={pct()}
+                onChange={({ value }) => seekDrag.set(Number(value))}
+                onChangeEnd={({ value }) => {
+                  const d = duration();
+                  seekTo((Number(value) / 100) * d);
+                  seekDrag.set(null);
+                  pokeControls();
+                }}
+                accessibilityLabel="Seek"
+                class="flex-1"
+                trackClass="h-1 flex-1 rounded-full bg-white/25"
+                indicatorClass="h-full"
+                rangeClass="rounded-full bg-red-600"
+                thumbClass="h-3 w-3 rounded-full bg-white"
+              />
+              <Text class="w-10 text-[11px] font-medium text-zinc-300">
+                {fmtTime(dur())}
+              </Text>
+            </View>
+            <View class="flex-row items-center gap-2">
+              <If when={canPrev()}>
+                <View
+                  role="button"
+                  onPress={() => {
+                    pokeControls();
+                    void prevEpisode();
+                  }}
+                  class={ctlBtn}
+                >
+                  <Text class="text-base text-white">⏮</Text>
+                </View>
+              </If>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  togglePlay();
+                }}
+                class="flex-row items-center justify-center rounded-full bg-white/10 px-4 py-2 active:bg-white/25"
+              >
+                <Text class="text-lg font-bold text-white">
+                  {paused() ? "▶" : "⏸"}
+                </Text>
+              </View>
+              <If when={canNext()}>
+                <View
+                  role="button"
+                  onPress={() => {
+                    pokeControls();
+                    void nextEpisode();
+                  }}
+                  class={ctlBtn}
+                >
+                  <Text class="text-base text-white">⏭</Text>
+                </View>
+              </If>
+              <View class="flex-1" />
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  seekBy(-10);
+                }}
+                class={ctlBtn}
+              >
+                <Text class="text-xs font-bold text-white">−10s</Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  seekBy(10);
+                }}
+                class={ctlBtn}
+              >
+                <Text class="text-xs font-bold text-white">+10s</Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  enterFullscreen();
+                }}
+                class={ctlBtn}
+              >
+                <Text class="text-sm font-bold text-white">⛶</Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  openPalette();
+                }}
+                class={ctlBtn}
+              >
+                <Text class="text-sm font-bold text-white">⋯</Text>
+              </View>
+            </View>
+          </View>
+        </>
+      </If>
+    </View>
+  );
+}
 
 export function Player() {
   // (Re)arm state, episode list and resume only when the route itself
@@ -74,6 +303,24 @@ export function Player() {
   const r = computed(() => playerRoute());
   const overlay = computed(() => showPalette() || showSources());
 
+  // iOS blocks the embed's autoplay; a programmatic play() once the page
+  // has settled works (verified against WKWebView), so retry it once —
+  // the user already pressed Play on the title page.
+  let autoPlayed = "";
+  effect(() => {
+    const u = src();
+    if (!mobile || !u) return;
+    if (autoPlayed === u) return;
+    autoPlayed = u;
+    setTimeout(() => {
+      if (mediaPaused()) playPlayback();
+      // Native fullscreen is the mobile player: landscape, system
+      // controls, no letterboxing. If the page refuses the call the
+      // inline overlay controls remain.
+      enterFullscreen();
+    }, 9000);
+  });
+
   const canNext = computed(() => {
     const p = r();
     if (!p || p.type === "movie") return false;
@@ -96,9 +343,10 @@ export function Player() {
       .slice(0, 2),
   );
   const mobile = !platform.desktop;
-  // Touch devices always get the control strip (back, palette, sources);
-  // desktop shows it only when there is something to put in it.
-  const showBar = computed(() => mobile || canNext() || recentDownloads().length > 0);
+  // Touch devices get the auto-hiding overlay controls instead of a
+  // permanent strip; the strip stays for desktop (next episode,
+  // downloads).
+  const showBar = computed(() => !mobile && (canNext() || recentDownloads().length > 0));
   const paletteWidth = platform.select({ desktop: 620 });
   const sourcesWidth = platform.select({ desktop: 560 });
 
@@ -143,6 +391,11 @@ export function Player() {
                 {extLoading() ? "Loading source…" : "This source cannot play this title."}
               </Text>
             </View>
+          </If>
+          {/* Touch controls composite over the WKWebView on iOS; hidden
+              while the palette or source picker owns the screen. */}
+          <If when={mobile && !overlay()}>
+            <MobileControls />
           </If>
         </View>
 
@@ -266,39 +519,10 @@ export function Player() {
       </View>
 
       {/* Bottom bar: download status + next episode (the embed player
-          owns its own timeline — no duplicate progress UI). On touch
-          devices it also carries the only navigation: back, the command
-          palette and the source picker (no title bar, no keyboard). */}
+          owns its own timeline — no duplicate progress UI). Touch
+          devices use the auto-hiding overlay instead. */}
       <If when={showBar()}>
         <View class="flex-row items-center gap-3 border-t border-zinc-800 bg-zinc-950 px-3 py-2">
-          <If when={mobile}>
-            <>
-              <View
-                role="button"
-                onPress={() => goBack()}
-                class="rounded-lg bg-zinc-800 px-3 py-1.5"
-              >
-                <Text class="text-sm font-bold text-zinc-200">‹ Back</Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => togglePalette()}
-                class="rounded-lg bg-zinc-800 px-3 py-1.5"
-              >
-                <Text class="text-sm font-bold text-zinc-200">Controls</Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => {
-                  showPalette.set(false);
-                  showSources.set(!showSources());
-                }}
-                class="rounded-lg bg-zinc-800 px-3 py-1.5"
-              >
-                <Text class="text-sm font-bold text-zinc-200">⇄ Sources</Text>
-              </View>
-            </>
-          </If>
           <View class="flex-1 flex-col gap-0.5">
             <Each of={recentDownloads()}>
               {(d) => (

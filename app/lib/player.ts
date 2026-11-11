@@ -37,6 +37,7 @@ export const position = signal(0);
 export const duration = signal(0);
 export const mediaPaused = signal(false);
 export const mediaRate = signal(1);
+export const mediaFullscreen = signal(false);
 /** Media URLs the embed page has fetched (m3u8/mp4/…), newest first. */
 export const streamUrls = signal<string[]>([]);
 /** Request headers the page used per stream URL (for the downloader). */
@@ -82,6 +83,7 @@ export const PLAYER_BRIDGE = `(function () {
   var stdRates = { 0.5: 1, 0.75: 1, 1: 1, 1.25: 1, 1.5: 1 };
   var allowedRate = null;
   var pendingSeek = null;
+  var fittedVideo = null;
   var keyBlock = null;
   // The real player is usually the video with the most readyState +
   // duration; pages can carry preview/hover videos too.
@@ -249,6 +251,18 @@ export const PLAYER_BRIDGE = `(function () {
         for (var k = 0; k < ts.length; k++) {
           ts[k].mode = (k === m.i) ? 'showing' : (ts[k].mode === 'showing' ? 'hidden' : 'disabled');
         }
+      } else if (m.t === 'fs') {
+        // Native fullscreen: on iOS this is AVPlayerViewController —
+        // landscape, system controls, rotation handled by the OS.
+        try {
+          if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+          else if (v.requestFullscreen) v.requestFullscreen();
+        } catch (err) {}
+      } else if (m.t === 'fsx') {
+        try {
+          if (v.webkitExitFullscreen) v.webkitExitFullscreen();
+          else if (document.exitFullscreen) document.exitFullscreen();
+        } catch (err) {}
       }
     } catch (err) {}
   });
@@ -263,6 +277,29 @@ export const PLAYER_BRIDGE = `(function () {
       try { nv = document.querySelectorAll('video').length; } catch (e) {}
       report(JSON.stringify({ t: -1, n: nv }));
       return;
+    }
+    // Fill: embed players often size the <video> to a fixed aspect or
+    // leave page chrome around it, producing black bars. Once per video
+    // element, pin it to the viewport so the picture uses the whole
+    // WebView; object-fit stays "contain" so the picture itself is never
+    // cropped — only the empty page around it goes away.
+    if (fittedVideo !== v) {
+      fittedVideo = v;
+      try {
+        var r = v.getBoundingClientRect();
+        if (r.width < window.innerWidth * 0.98 || r.height < window.innerHeight * 0.98) {
+          v.style.setProperty('position', 'fixed', 'important');
+          v.style.setProperty('top', '0', 'important');
+          v.style.setProperty('left', '0', 'important');
+          v.style.setProperty('right', '0', 'important');
+          v.style.setProperty('bottom', '0', 'important');
+          v.style.setProperty('width', '100%', 'important');
+          v.style.setProperty('height', '100%', 'important');
+          v.style.setProperty('object-fit', 'contain', 'important');
+          v.style.setProperty('background', '#000', 'important');
+          v.style.setProperty('z-index', '2147483000', 'important');
+        }
+      } catch (e) {}
     }
     if (pendingSeek != null) {
       // Clear BEFORE assigning: if currentTime throws (video has no src
@@ -279,12 +316,13 @@ export const PLAYER_BRIDGE = `(function () {
         tracks.push({ i: k, label: tr.label || tr.language || ('Track ' + (k + 1)), mode: tr.mode });
       }
     } catch (e) {}
-    var t = 0, d = 0, r = 1;
+    var t = 0, d = 0, r = 1, f = false;
     try { t = v.currentTime || 0; } catch (e) {}
     try { d = v.duration || 0; } catch (e) {}
     try { r = v.playbackRate || 1; } catch (e) {}
+    try { f = !!(v.webkitDisplayingFullscreen || (document.fullscreenElement === v)); } catch (e) {}
     report(JSON.stringify({
-      t: t, d: d, p: !!v.paused, r: r, tracks: tracks,
+      t: t, d: d, p: !!v.paused, r: r, f: f, tracks: tracks,
     }));
   }, 1500);
   // Boot beacon: proves the injected script ran at all, even if the
@@ -401,6 +439,7 @@ export function onPlayerMessage(e: { data: unknown }) {
     position.set(v.t);
     if (typeof v.d === "number" && v.d > 0) duration.set(v.d);
     mediaPaused.set(!!v.p);
+    mediaFullscreen.set(!!v.f);
     if (typeof v.r === "number" && v.r > 0) mediaRate.set(v.r);
     if (Array.isArray(v.tracks)) {
       subTracks.set(
@@ -526,8 +565,28 @@ export function pausePlayback() {
   send({ t: "pause" });
 }
 
+export function playPlayback() {
+  send({ t: "play" });
+}
+
 export function seekBy(sec: number) {
   send({ t: "seekby", s: sec });
+}
+
+/** Native fullscreen (iOS: AVPlayerViewController — landscape + system
+ * controls). Reports keep arriving through `mediaFullscreen`. */
+export function enterFullscreen() {
+  send({ t: "fs" });
+}
+
+export function exitFullscreen() {
+  send({ t: "fsx" });
+}
+
+/** Absolute seek to `sec` seconds — the bridge applies it as soon as a
+ * video element exists, so it is safe before playback starts. */
+export function seekTo(sec: number) {
+  send({ t: "seek", p: Math.max(0, sec) });
 }
 
 export function setRate(rate: number) {

@@ -5,8 +5,8 @@
 // card takes the space. Cmd+K toggles the palette; it lists episodes and
 // playback controls, filters as you type, and ⌘1–⌘9 pick items.
 
-import { computed, effect, Text, View, WebView } from "nsh";
-import { route } from "../lib/router";
+import { computed, effect, platform, Text, View, WebView } from "nsh";
+import { goBack, route } from "../lib/router";
 import {
   cancelDownload,
   debug,
@@ -33,6 +33,7 @@ import {
   sourceId,
   startPlayer,
   stopPlayer,
+  togglePalette,
   webview,
 } from "../lib/player";
 import { NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
@@ -94,7 +95,12 @@ export function Player() {
       .sort((a, b) => Number(b.status === "running") - Number(a.status === "running"))
       .slice(0, 2),
   );
-  const showBar = computed(() => canNext() || recentDownloads().length > 0);
+  const mobile = !platform.desktop;
+  // Touch devices always get the control strip (back, palette, sources);
+  // desktop shows it only when there is something to put in it.
+  const showBar = computed(() => mobile || canNext() || recentDownloads().length > 0);
+  const paletteWidth = platform.select({ desktop: 620 });
+  const sourcesWidth = platform.select({ desktop: 560 });
 
   return (
     <View class="flex-1 bg-black">
@@ -113,7 +119,13 @@ export function Player() {
                 ref={(node) => webview.set(node)}
                 src={u()}
                 class="flex-1"
-                userAgent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+                userAgent={platform.select({
+                  desktop:
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                  ios: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                  android:
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                })}
                 injectedJavaScriptBeforeContentLoaded={PLAYER_BRIDGE}
                 onMessage={onPlayerMessage}
                 onLoadStart={(e: unknown) => debug("wv:loadStart", e)}
@@ -140,19 +152,22 @@ export function Player() {
             <If when={showPalette()}>
               <View
                 class="flex flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900"
-                style={{ width: 620, height: "62%" }}
+                style={{ width: paletteWidth ?? "92%", height: "62%" }}
               >
                 <View class="flex-row items-center gap-2 border-b border-zinc-800 px-4 py-3">
                   <Text class="text-sm font-bold text-zinc-100">
                     {paletteViewTitle()}
                   </Text>
                   <View class="flex-1" />
-                  <Text class="text-[11px] text-zinc-600">esc</Text>
+                  <If when={platform.desktop}>
+                    <Text class="text-[11px] text-zinc-600">esc</Text>
+                  </If>
                 </View>
                 {/* The palette owns the keyboard through keymap bindings
                     (bound on open, removed on close) — no text field, so
-                    Escape and every printable key reach it. */}
-                <If when={paletteView() === "root"}>
+                    Escape and every printable key reach it. On touch
+                    devices there is no keyboard: the list is tapped. */}
+                <If when={paletteView() === "root" && platform.desktop}>
                   <View class="mx-3 mb-2 mt-1 flex-row items-center rounded-lg border border-zinc-800 bg-zinc-950 px-3"
                     style={{ height: 40 }}
                   >
@@ -160,7 +175,9 @@ export function Player() {
                       <Text class="text-sm text-zinc-500">Type to filter…</Text>
                     </If>
                     <Text class="flex-1 text-sm text-zinc-100">{paletteQuery()}</Text>
-                    <Text class="text-[11px] text-zinc-600">↵</Text>
+                    <If when={platform.desktop}>
+                      <Text class="text-[11px] text-zinc-600">↵</Text>
+                    </If>
                   </View>
                 </If>
                 <View class="flex-1 overflow-y-auto p-1.5">
@@ -181,7 +198,7 @@ export function Player() {
                             }}
                             class="mx-1 flex-row items-center gap-2 rounded-lg px-3 py-2 active:bg-zinc-800"
                           >
-                            <If when={(row().num ?? 99) <= 9}>
+                            <If when={platform.desktop && (row().num ?? 99) <= 9}>
                               <Text class="w-6 text-[11px] font-bold text-zinc-600">
                                 ⌘{row().num}
                               </Text>
@@ -207,7 +224,7 @@ export function Player() {
             <If when={showSources()}>
               <View
                 class="flex flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900"
-                style={{ width: 560, height: "55%" }}
+                style={{ width: sourcesWidth ?? "92%", height: "55%" }}
               >
                 <View class="border-b border-zinc-800 px-4 py-3">
                   <Text class="text-sm font-bold text-zinc-100">Sources</Text>
@@ -249,9 +266,39 @@ export function Player() {
       </View>
 
       {/* Bottom bar: download status + next episode (the embed player
-          owns its own timeline — no duplicate progress UI). */}
+          owns its own timeline — no duplicate progress UI). On touch
+          devices it also carries the only navigation: back, the command
+          palette and the source picker (no title bar, no keyboard). */}
       <If when={showBar()}>
         <View class="flex-row items-center gap-3 border-t border-zinc-800 bg-zinc-950 px-3 py-2">
+          <If when={mobile}>
+            <>
+              <View
+                role="button"
+                onPress={() => goBack()}
+                class="rounded-lg bg-zinc-800 px-3 py-1.5"
+              >
+                <Text class="text-sm font-bold text-zinc-200">‹ Back</Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => togglePalette()}
+                class="rounded-lg bg-zinc-800 px-3 py-1.5"
+              >
+                <Text class="text-sm font-bold text-zinc-200">Controls</Text>
+              </View>
+              <View
+                role="button"
+                onPress={() => {
+                  showPalette.set(false);
+                  showSources.set(!showSources());
+                }}
+                class="rounded-lg bg-zinc-800 px-3 py-1.5"
+              >
+                <Text class="text-sm font-bold text-zinc-200">⇄ Sources</Text>
+              </View>
+            </>
+          </If>
           <View class="flex-1 flex-col gap-0.5">
             <Each of={recentDownloads()}>
               {(d) => (

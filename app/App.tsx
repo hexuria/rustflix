@@ -1,8 +1,9 @@
 // rustflix app shell: sidebar navigation + the routed screen.
 // The whole UI is TSX; the GPUI host only provides the window.
 
-import { computed, effect, keymap, mount, signal, Storage, Text, View } from "nsh";
+import { computed, effect, keymap, mount, platform, signal, Storage, Text, View } from "nsh";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
+import { TabBar } from "nsh/mobile";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { canGoBack, canGoForward, goBack, goForward, navigate, route } from "./lib/router";
 import {
@@ -122,9 +123,49 @@ function TitleBar() {
   );
 }
 
+// The phone/tablet shell: the system tab bar (UITabBar on iOS) under the
+// content instead of the desktop sidebar. Title and setup keep the bar —
+// it is the only way back to the tabs there. The player is immersive and
+// brings its own controls.
+const TABS = [
+  { title: "Home", icon: "house", route: "home" },
+  { title: "Search", icon: "magnifyingglass", route: "search" },
+  { title: "My List", icon: "bookmark", route: "library" },
+  { title: "Settings", icon: "gearshape", route: "settings" },
+] as const;
+
+function MobileShell() {
+  const r = computed(() => route());
+  const tabIndex = computed(() => TABS.findIndex((t) => t.route === r()?.name));
+  const showBar = computed(() =>
+    ["home", "search", "library", "settings", "setup", "title"].includes(r()?.name ?? ""),
+  );
+  return (
+    <View class="flex-1 flex-col bg-background">
+      <View class="flex-1">
+        <SwitchScreen />
+      </View>
+      <If when={showBar()}>
+        <TabBar
+          items={TABS.map((t) => ({
+            title: t.title,
+            icon: platform.select({ ios: t.icon }),
+          }))}
+          selectedIndex={tabIndex() >= 0 ? tabIndex() : TABS.length}
+          onChange={({ index }) => {
+            const t = TABS[index];
+            if (t) navigate({ name: t.route });
+          }}
+        />
+      </If>
+    </View>
+  );
+}
+
 function Shell() {
   const r = computed(() => route());
   const needsSetup = computed(() => !hasKey());
+  if (!platform.desktop) return <MobileShell />;
   return (
     <View class="flex-1 flex-row bg-background">
       <If when={r()?.name !== "player"}>

@@ -5,7 +5,7 @@
 // card takes the space. Cmd+K toggles the palette; it lists episodes and
 // playback controls, filters as you type, and ⌘1–⌘9 pick items.
 
-import { computed, effect, platform, signal, Text, View, WebView } from "nsh";
+import { computed, effect, Image, platform, signal, Text, View, WebView } from "nsh";
 import { Dialog, Slider } from "nsh/base";
 import { goBack, route } from "../lib/router";
 import {
@@ -96,6 +96,32 @@ function fmtTime(sec: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
+// Vector icons drawn as inline SVG data URIs — real shapes, not emoji
+// font glyphs, so they match the system player's line-icon look.
+const icon = (body: string, size = 22) =>
+  `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}">${body}</svg>`,
+  )}`;
+
+const ICONS = {
+  back: `<path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`,
+  play: `<path d="M8.5 5.5v13l10.5-6.5z" fill="#fff"/>`,
+  pause: `<rect x="6.5" y="5" width="3.8" height="14" rx="1.3" fill="#fff"/><rect x="13.7" y="5" width="3.8" height="14" rx="1.3" fill="#fff"/>`,
+  vol: `<path d="M4 9.5v5h3.4L12 18.6V5.4L7.4 9.5H4z" fill="#fff"/><path d="M15 9.6a3.8 3.8 0 0 1 0 4.8M17.6 7.4a7.2 7.2 0 0 1 0 9.2" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/>`,
+  mute: `<path d="M4 9.5v5h3.4L12 18.6V5.4L7.4 9.5H4z" fill="#fff"/><path d="M15.5 9.8l5 4.4m0-4.4-5 4.4" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>`,
+  sources: `<path d="M8.5 7h10m0 0-3.2-3.2M18.5 7l-3.2 3.2M15.5 17H5.5m0 0 3.2-3.2M5.5 17l3.2 3.2" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>`,
+  fullscreen: `<path d="M9.5 4.5H4.5v5M14.5 4.5h5v5M9.5 19.5h-5v-5M14.5 19.5h5v-5" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
+  prevEp: `<rect x="4.8" y="5" width="2.8" height="14" rx="1" fill="#fff"/><path d="M18.6 5.8v12.4L10.4 12z" fill="#fff"/>`,
+  nextEp: `<rect x="16.4" y="5" width="2.8" height="14" rx="1" fill="#fff"/><path d="M5.4 5.8v12.4L13.6 12z" fill="#fff"/>`,
+  back10: `<path d="M3.5 12a8.5 8.5 0 1 0 2.5-6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/><path d="M3.5 3.8v5.4h5.4" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><text x="12.4" y="14.6" text-anchor="middle" font-size="6.4" font-weight="700" fill="#fff" font-family="-apple-system,sans-serif">10</text>`,
+  fwd10: `<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/><path d="M20.5 3.8v5.4h-5.4" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><text x="11.6" y="14.6" text-anchor="middle" font-size="6.4" font-weight="700" fill="#fff" font-family="-apple-system,sans-serif">10</text>`,
+} as const;
+
+function Glyph(props: { d: keyof typeof ICONS; size?: number }) {
+  const s = props.size ?? 22;
+  return <Image src={icon(ICONS[props.d], s)} style={{ width: s, height: s }} />;
+}
+
 function MobileControls() {
   const r = computed(() => playerRoute());
   const paused = computed(() => mediaPaused());
@@ -162,10 +188,10 @@ function MobileControls() {
               pokeControls();
               goBack();
             }}
-            class={`${circle} h-10 w-10`}
+            class={`${circle} h-11 w-11`}
             style={glass}
           >
-            <Text class="text-lg font-bold text-white">‹</Text>
+            <Glyph d="back" size={20} />
           </View>
           <View class="flex-1" />
           <View
@@ -174,10 +200,10 @@ function MobileControls() {
               pokeControls();
               toggleMute();
             }}
-            class={`${circle} h-10 w-10`}
+            class={`${circle} h-11 w-11`}
             style={glass}
           >
-            <Text class="text-base text-white">{muted() ? "🔇" : "🔊"}</Text>
+            <Glyph d={muted() ? "mute" : "vol"} size={20} />
           </View>
           <View
             role="button"
@@ -185,10 +211,10 @@ function MobileControls() {
               pokeControls();
               showSources.set(!showSources());
             }}
-            class={`${circle} ml-2 h-10 w-10`}
+            class={`${circle} ml-2 h-11 w-11`}
             style={glass}
           >
-            <Text class="text-base font-bold text-white">⇄</Text>
+            <Glyph d="sources" size={20} />
           </View>
           <View
             role="button"
@@ -196,16 +222,16 @@ function MobileControls() {
               pokeControls();
               enterFullscreen();
             }}
-            class={`${circle} ml-2 h-10 w-10`}
+            class={`${circle} ml-2 h-11 w-11`}
             style={glass}
           >
-            <Text class="text-base font-bold text-white">⛶</Text>
+            <Glyph d="fullscreen" size={20} />
           </View>
         </View>
         {/* Center transport: episode skip flanks the −10/+10 pair around
             a larger play button, like the system player. */}
         <View class="absolute inset-0 items-center justify-center">
-          <View class="flex-row items-center gap-5">
+          <View class="flex-row items-center gap-6">
             <If when={canPrev()}>
               <View
                 role="button"
@@ -213,10 +239,10 @@ function MobileControls() {
                   pokeControls();
                   void prevEpisode();
                 }}
-                class={`${circle} h-11 w-11`}
+                class={`${circle} h-12 w-12`}
                 style={glass}
               >
-                <Text class="text-lg text-white">⏮</Text>
+                <Glyph d="prevEp" size={24} />
               </View>
             </If>
             <View
@@ -225,11 +251,10 @@ function MobileControls() {
                 pokeControls();
                 seekBy(-10);
               }}
-              class={`${circle} h-12 w-12`}
+              class={`${circle} h-14 w-14`}
               style={glass}
             >
-              <Text class="text-sm font-bold text-white">↺</Text>
-              <Text class="text-[9px] font-bold leading-none text-white">10</Text>
+              <Glyph d="back10" size={30} />
             </View>
             <View
               role="button"
@@ -237,12 +262,10 @@ function MobileControls() {
                 pokeControls();
                 togglePlay();
               }}
-              class={`${circle} h-16 w-16`}
+              class={`${circle} h-20 w-20`}
               style={glass}
             >
-              <Text class="text-2xl font-bold text-white">
-                {paused() ? "▶" : "⏸"}
-              </Text>
+              <Glyph d={paused() ? "play" : "pause"} size={30} />
             </View>
             <View
               role="button"
@@ -250,11 +273,10 @@ function MobileControls() {
                 pokeControls();
                 seekBy(10);
               }}
-              class={`${circle} h-12 w-12`}
+              class={`${circle} h-14 w-14`}
               style={glass}
             >
-              <Text class="text-sm font-bold text-white">↻</Text>
-              <Text class="text-[9px] font-bold leading-none text-white">10</Text>
+              <Glyph d="fwd10" size={30} />
             </View>
             <If when={canNext()}>
               <View
@@ -263,17 +285,17 @@ function MobileControls() {
                   pokeControls();
                   void nextEpisode();
                 }}
-                class={`${circle} h-11 w-11`}
+                class={`${circle} h-12 w-12`}
                 style={glass}
               >
-                <Text class="text-lg text-white">⏭</Text>
+                <Glyph d="nextEp" size={24} />
               </View>
             </If>
           </View>
         </View>
         {/* Bottom: playback speed + subtitles right-aligned above the
             seek bar, which shows elapsed and remaining time. */}
-        <View class="absolute inset-x-0 bottom-0 flex-col gap-2 bg-black/50 px-4 pb-5 pt-10">
+        <View class="absolute inset-x-0 bottom-0 flex-col gap-2 bg-black/50 px-4 pb-6 pt-12">
           <View class="flex-row items-center justify-end gap-2">
             <View
               role="button"
@@ -281,7 +303,7 @@ function MobileControls() {
                 pokeControls();
                 cycleRate();
               }}
-              class={`${circle} h-9 px-3`}
+              class={`${circle} h-10 px-4`}
               style={glass}
             >
               <Text class="text-xs font-bold text-white">
@@ -295,14 +317,14 @@ function MobileControls() {
                 paletteView.set("subs");
                 openPalette();
               }}
-              class={`${circle} h-9 w-9`}
+              class={`${circle} h-10 w-10`}
               style={glass}
             >
               <Text class="text-[11px] font-bold text-white">CC</Text>
             </View>
           </View>
           <View class="flex-row items-center gap-2">
-            <Text class="w-10 text-right text-[11px] font-medium text-zinc-300">
+            <Text class="w-11 text-right text-xs font-medium text-zinc-300">
               {fmtTime(position())}
             </Text>
             <Slider
@@ -321,7 +343,7 @@ function MobileControls() {
               rangeClass="h-full rounded-full bg-red-600"
               thumbClass="h-4 w-4 rounded-full bg-white"
             />
-            <Text class="w-10 text-[11px] font-medium text-zinc-300">
+            <Text class="w-11 text-xs font-medium text-zinc-300">
               -{fmtTime(remaining())}
             </Text>
           </View>

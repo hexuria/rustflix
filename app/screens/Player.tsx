@@ -305,11 +305,12 @@ export function Player() {
 
   // iOS blocks the embed's autoplay; a programmatic play() once the page
   // has settled works (verified against WKWebView), so retry it once —
-  // the user already pressed Play on the title page.
+  // the user already pressed Play on the title page. On desktop the same
+  // retry covers embeds that ignore the autoPlay parameter.
   let autoPlayed = "";
   effect(() => {
     const u = src();
-    if (!mobile || !u) return;
+    if (!u) return;
     if (autoPlayed === u) return;
     autoPlayed = u;
     setTimeout(() => {
@@ -317,7 +318,7 @@ export function Player() {
       // Native fullscreen is the mobile player: landscape, system
       // controls, no letterboxing. If the page refuses the call the
       // inline overlay controls remain.
-      enterFullscreen();
+      if (mobile) enterFullscreen();
     }, 9000);
   });
 

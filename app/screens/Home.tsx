@@ -1,6 +1,6 @@
 // Home: a hero banner over horizontal rows, like Streambert's HomePage.
 
-import { computed, effect, signal, Text, View } from "nsh";
+import { computed, effect, signal, Scroll, Text, View } from "nsh";
 import { Image } from "nsh";
 import { aniTitle, aniTrending, type AniMedia } from "../lib/anilist";
 import { goTitle, navigate } from "../lib/router";
@@ -110,9 +110,9 @@ export function Home() {
     load();
   });
   return (
-    <View class="flex-1">
+    <Scroll class="flex-1">
       <Hero />
-      <View class="flex-1 gap-6 pt-4">
+      <View class="gap-6 pt-4">
         <If when={error()}>
           {(e) => (
             <View class="mx-4 rounded-lg border border-red-800 bg-red-950/40 p-3">
@@ -157,6 +157,6 @@ export function Home() {
           </Each>
         </Row>
       </View>
-    </View>
+    </Scroll>
   );
 }

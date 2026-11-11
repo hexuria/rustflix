@@ -37,6 +37,7 @@ import {
   playerRoute,
   playerUrl,
   prevEpisode,
+  seekBy,
   seekTo,
   setPageKeysBlocked,
   setRate,
@@ -302,9 +303,33 @@ export function Player() {
     setPageKeysBlocked(showPalette() || showSources());
   });
 
+  // Back from native fullscreen (AVPlayerViewController's Done), the
+  // inline player remounts its chrome: keep it hidden until the next tap
+  // instead of flashing the controls over the video again.
+  let wasFs = false;
+  effect(() => {
+    const fs = mediaFullscreen();
+    if (wasFs && !fs) {
+      controlsVisible.set(false);
+      if (hideTimer) clearTimeout(hideTimer);
+    }
+    wasFs = fs;
+  });
+
   const src = computed(() => playerUrl());
   const r = computed(() => playerRoute());
   const overlay = computed(() => showPalette() || showSources());
+
+  // Fresh playback: flash the chrome once, then let the hide timer run —
+  // controlsVisible starts true with no timer armed, which otherwise left
+  // the overlay stuck on screen until the first tap.
+  let shownFor = "";
+  effect(() => {
+    const u = src();
+    if (!u || u === shownFor) return;
+    shownFor = u;
+    pokeControls();
+  });
 
   // NOTE: an in-page control bar was tried and removed — on GPUI/macOS
   // the GPUIView sits above the WKWebView and swallows every mouse event
@@ -564,6 +589,15 @@ export function Player() {
           auto-hiding overlay instead. */}
       <If when={showBar()}>
         <View class="flex-col border-t border-zinc-800 bg-zinc-950">
+          {/* Progress line across the top edge of the bar — the closest a
+              GPUI view can get to YouTube's on-video progress bar, since
+              nothing can draw over the native web view. */}
+          <View class="h-[3px] w-full bg-zinc-800">
+            <View
+              class="h-full bg-red-600"
+              style={{ width: `${Math.min(100, Math.max(0, pct()))}%` }}
+            />
+          </View>
           <View class="flex-row items-center gap-1 px-3 py-2">
             <View
               role="button"

@@ -1,6 +1,6 @@
 // Settings: TMDB key, default source, subtitle language, data controls.
 
-import { signal, Storage, Text, View } from "nsh";
+import { signal, Scroll, Storage, Text, View } from "nsh";
 import { Input } from "nsh/base";
 import { clearCache, hasKey, loadKey, saveKey } from "../lib/tmdb";
 import { canDownload, defaultDownloadDir, defaultDownloaderPath, setDebugEnabled } from "../lib/player";
@@ -41,7 +41,8 @@ export function Settings() {
   prefillDownloader();
 
   return (
-    <View class="flex-1 gap-6 p-4">
+    <Scroll class="flex-1">
+      <View class="gap-6 p-4">
       <Section title="TMDB API Key">
         <Text class="text-sm text-muted-foreground">
           A TMDB API Read Access Token (v4) or v3 API key. Stored locally in the app's
@@ -203,6 +204,7 @@ export function Settings() {
           web view, local watchlist and progress.
         </Text>
       </Section>
-    </View>
+      </View>
+    </Scroll>
   );
 }

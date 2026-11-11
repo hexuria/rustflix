@@ -1,6 +1,6 @@
 // Search: a query field over TMDB multi-search and AniList anime.
 
-import { signal, Text, View, Image } from "nsh";
+import { signal, Scroll, Text, View, Image } from "nsh";
 import { Input } from "nsh/base";
 import { aniSearch, aniTitle, type AniMedia } from "../lib/anilist";
 import { goTitle, navigate } from "../lib/router";
@@ -54,7 +54,7 @@ export function Search() {
         <Text class="text-sm text-muted-foreground">Searching…</Text>
       </If>
       <If when={searched() && !searching()}>
-        <View class="flex-1">
+        <Scroll class="flex-1">
           <Text class="pb-2 text-sm font-semibold text-muted-foreground">
             {`${results().length + animeResults().length} results`}
           </Text>
@@ -92,7 +92,7 @@ export function Search() {
               )}
             </Each>
           </View>
-        </View>
+        </Scroll>
       </If>
       <If when={!searched()}>
         <Text class="text-sm text-muted-foreground">

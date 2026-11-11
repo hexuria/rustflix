@@ -1,10 +1,17 @@
 // rustflix app shell: sidebar navigation + the routed screen.
 // The whole UI is TSX; the GPUI host only provides the window.
 
-import { computed, mount, signal, Text, View } from "nsh";
+import { computed, effect, keymap, mount, signal, Text, View } from "nsh";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { canGoBack, canGoForward, goBack, goForward, navigate, route } from "./lib/router";
+import {
+  nextEpisode,
+  prevEpisode,
+  showPalette,
+  showSources,
+  togglePalette,
+} from "./lib/player";
 import { loadLibrary } from "./lib/store";
 import { Home } from "./screens/Home";
 import { Library } from "./screens/Library";
@@ -54,9 +61,23 @@ function ChromeButton(props: { label: string; onPress: () => void; disabled?: bo
   );
 }
 
+// What the title bar and the window title show: the title being played
+// (with its episode) or the app's name everywhere else.
+function playingTitle(): string {
+  const r = route();
+  if (r.name !== "player" || !r.title) return "rustflix";
+  const ep = r.season
+    ? `S${r.season}E${r.episode ?? 1}`
+    : r.episode
+      ? `E${r.episode}`
+      : "";
+  return `${r.title}${ep ? ` — ${ep}` : ""}`;
+}
+
 // The window's own title bar (nsh.json `window.titleBar: hidden`): drag
 // anywhere on it, traffic lights keep their place via `titleBar()`.
 function TitleBar() {
+  const r = computed(() => route());
   return (
     <If when={hasWindow}>
       <View
@@ -70,7 +91,21 @@ function TitleBar() {
       >
         <ChromeButton label="‹" onPress={goBack} disabled={!canGoBack()} />
         <ChromeButton label="›" onPress={goForward} disabled={!canGoForward()} />
-        <Text class="pl-2 text-sm font-extrabold text-foreground">rustflix</Text>
+        <Text class="flex-1 pl-2 text-sm font-extrabold text-foreground" style={{ numberOfLines: 1 }}>
+          {playingTitle()}
+        </Text>
+        <If when={r()?.name === "player"}>
+          <View
+            role="button"
+            onPress={() => {
+              showPalette.set(false);
+              showSources.set(!showSources());
+            }}
+            class="rounded-md px-2 py-1 active:bg-muted"
+          >
+            <Text class="text-sm font-bold text-foreground">⇄</Text>
+          </View>
+        </If>
       </View>
     </If>
   );
@@ -145,6 +180,30 @@ export function App() {
   // The system title bar hides; TitleBar below draws our own (the
   // traffic lights stay, in the area `titleBar()` reports).
   Window.setTitleBar({ style: "hidden", height: 40 });
+
+  // The native window title follows the route (movie name while playing).
+  effect(() => {
+    Window.setTitle(playingTitle());
+  });
+
+  // Keyboard shortcuts: mac-style back/forward everywhere, and the
+  // player's episode/palette keys while a video plays.
+  effect(() => {
+    keymap.bind({
+      "mod+[": () => goBack(),
+      "mod+]": () => goForward(),
+      "mod+k": () => {
+        if (route().name === "player") togglePalette();
+      },
+      "mod+n": () => {
+        if (route().name === "player") void nextEpisode();
+      },
+      "mod+p": () => {
+        if (route().name === "player") void prevEpisode();
+      },
+    });
+  });
+
   return (
     <View class="flex-1 bg-background">
       <If when={ready()}>

@@ -6,3 +6,4 @@ Cargo.lock.bak
 # iOS: generated NSH bundle + Xcode project (regenerate via xcodegen/sync-bundle.sh)
 ios/Rustflix/nsh/
 ios/rustflix.xcodeproj/
+ios/build/

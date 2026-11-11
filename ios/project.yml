@@ -22,6 +22,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hexuria.rustflix
         PRODUCT_NAME: rustflix
+        # App Store requires both; bump CURRENT_PROJECT_VERSION per upload.
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: rustflix
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -30,4 +33,7 @@ targets:
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
+        # Team that owns the "Apple Distribution: Goldcoders Corp" cert;
+        # override locally if you sign with a different team.
+        DEVELOPMENT_TEAM: "5KZ8MD34QW"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

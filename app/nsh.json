@@ -22,6 +22,9 @@
     },
     "openUrl": {
       "schemes": ["https"]
+    },
+    "process": {
+      "execute": ["/bin/sh", "cmd.exe"]
     }
   }
 }

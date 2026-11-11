@@ -5,10 +5,11 @@
 // card takes the space. Cmd+K toggles the palette; it lists episodes and
 // playback controls, filters as you type, and ⌘1–⌘9 pick items.
 
-import { computed, effect, signal, Text, View, WebView } from "nsh";
+import { computed, effect, Text, View, WebView } from "nsh";
 import { route } from "../lib/router";
 import {
-  duration,
+  cancelDownload,
+  downloads,
   episodes,
   loadEpisodes,
   nextEpisode,
@@ -22,7 +23,6 @@ import {
   PLAYER_BRIDGE,
   playerRoute,
   playerUrl,
-  position,
   showPalette,
   showSources,
   seasons,
@@ -32,8 +32,6 @@ import {
   webview,
 } from "../lib/player";
 import { NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
-
-const error = signal("");
 
 // The last player route we armed for. NSH effects re-run on signal
 // writes, and the player writes signals every probe — without this guard
@@ -87,6 +85,16 @@ export function Player() {
     return si >= 0 && si + 1 < ss.length;
   });
 
+  // Recent downloads (running first, then latest finished/failed) shown
+  // in the bottom bar so progress is visible outside the palette.
+  const recentDownloads = computed(() =>
+    downloads()
+      .slice()
+      .sort((a, b) => Number(b.status === "running") - Number(a.status === "running"))
+      .slice(0, 2),
+  );
+  const showBar = computed(() => canNext() || recentDownloads().length > 0);
+
   return (
     <View class="flex-1 bg-black">
       <View class="flex-1 flex-col">
@@ -105,7 +113,6 @@ export function Player() {
                 userAgent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
                 injectedJavaScript={PLAYER_BRIDGE}
                 onMessage={onPlayerMessage}
-                onError={(e) => error.set(String(e))}
               />
             )}
           </If>
@@ -199,10 +206,7 @@ export function Player() {
                     {(s) => (
                       <View
                         role="button"
-                        onPress={() => {
-                          pickSource(s().id);
-                          error.set("");
-                        }}
+                        onPress={() => pickSource(s().id)}
                         class="mx-1 flex-row items-center gap-2 rounded-lg px-3 py-2 active:bg-zinc-800"
                       >
                         <View class="flex-1">
@@ -233,25 +237,42 @@ export function Player() {
         </If>
       </View>
 
-      {/* Bottom bar: progress + next episode */}
-      <View class="gap-2 border-t border-zinc-800 bg-zinc-950 p-3">
-        <If when={error()}>
-          {(e) => <Text class="text-xs text-red-400">{e()}</Text>}
-        </If>
-        <If when={duration() > 0}>
-          <View class="h-1 w-full rounded bg-zinc-700">
-            <View
-              class="h-1 rounded bg-red-600"
-              style={{
-                width: `${Math.min(100, (position() / duration()) * 100)}%`,
-              }}
-            />
+      {/* Bottom bar: download status + next episode (the embed player
+          owns its own timeline — no duplicate progress UI). */}
+      <If when={showBar()}>
+        <View class="flex-row items-center gap-3 border-t border-zinc-800 bg-zinc-950 px-3 py-2">
+          <View class="flex-1 flex-col gap-0.5">
+            <Each of={recentDownloads()}>
+              {(d) => (
+                <View class="flex-row items-center gap-2">
+                  <Text
+                    class={
+                      d().status === "running"
+                        ? "text-xs text-sky-400"
+                        : d().status === "done"
+                          ? "text-xs text-green-500"
+                          : "text-xs text-red-400"
+                    }
+                  >
+                    {d().status === "running"
+                      ? `↓ ${d().name}${d().progress != null ? ` ${d().progress}%` : ""}`
+                      : d().status === "done"
+                        ? `✓ ${d().name} — downloaded`
+                        : `✗ ${d().name} — ${d().message.slice(0, 60)}`}
+                  </Text>
+                  <If when={d().status === "running"}>
+                    <View
+                      role="button"
+                      onPress={() => cancelDownload(d().id)}
+                      class="rounded px-1.5 py-0.5 active:bg-zinc-800"
+                    >
+                      <Text class="text-[10px] text-zinc-500">cancel</Text>
+                    </View>
+                  </If>
+                </View>
+              )}
+            </Each>
           </View>
-        </If>
-        <View class="flex-row items-center justify-between">
-          <Text class="text-xs text-zinc-400">
-            {duration() > 0 ? `${fmt(position())} / ${fmt(duration())}` : ""}
-          </Text>
           <If when={canNext()}>
             <View
               role="button"
@@ -262,16 +283,7 @@ export function Player() {
             </View>
           </If>
         </View>
-      </View>
+      </If>
     </View>
   );
-}
-
-function fmt(sec: number): string {
-  const s = Math.floor(sec % 60);
-  const m = Math.floor(sec / 60) % 60;
-  const h = Math.floor(sec / 3600);
-  const mm = String(m).padStart(2, "0");
-  const ss = String(s).padStart(2, "0");
-  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }

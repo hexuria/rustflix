@@ -15,6 +15,7 @@
 
 import { computed, keymap, signal, Storage } from "nsh";
 import type { WebViewRef } from "nsh";
+import process from "process";
 import { aniDetails } from "./anilist";
 import { navigate, route, setLeaveHook, type Route } from "./router";
 import { getSourceUrl, type MediaType } from "./sources";
@@ -36,6 +37,21 @@ export const position = signal(0);
 export const duration = signal(0);
 export const mediaPaused = signal(false);
 export const mediaRate = signal(1);
+/** Media URLs the embed page has fetched (m3u8/mp4/…), newest first. */
+export const streamUrls = signal<string[]>([]);
+
+export interface DownloadItem {
+  id: number;
+  name: string;
+  status: "running" | "done" | "error";
+  /** 0–100 when the downloader reports a percentage, else null. */
+  progress: number | null;
+  message: string;
+  /** Live child handle for cancellation (not persisted). */
+  proc?: { kill?: () => void };
+}
+
+export const downloads = signal<DownloadItem[]>([]);
 
 // --- Page bridge ------------------------------------------------------------
 //
@@ -85,6 +101,30 @@ export const PLAYER_BRIDGE = `(function () {
     try { m = JSON.parse(e.data); } catch (err) { return; }
     if (!m) return;
     if (m.t === 'seek' && typeof m.p === 'number') { pendingSeek = m.p; return; }
+    if (m.t === 'streams') {
+      // On-demand: collect media URLs the page has fetched (m3u8/mp4/mpd)
+      // from resource timing plus the picked video's own src, for the
+      // downloader. blob: srcs (hls.js MSE) are skipped — the playlist
+      // requests are what carry the real URLs.
+      var seen = {}, out = [], cand = [];
+      try {
+        var sv = pickVideo();
+        if (sv) cand.push(sv.currentSrc || sv.src || '');
+        var es = performance.getEntriesByType('resource');
+        for (var i = es.length - 1; i >= 0 && cand.length < 4000; i--) {
+          cand.push(es[i].name || '');
+        }
+      } catch (err) {}
+      for (var j = 0; j < cand.length && out.length < 16; j++) {
+        var u = cand[j];
+        if (!u || u.indexOf('blob:') === 0 || u.indexOf('data:') === 0 || seen[u]) continue;
+        if (/\.(m3u8|mp4|mpd|ism|m4s)(\?|#|$)/i.test(u) || /\.ism\//i.test(u)) {
+          seen[u] = 1; out.push(u);
+        }
+      }
+      report(JSON.stringify({ t: -2, streams: out }));
+      return;
+    }
     var v = pickVideo();
     if (!v) return;
     try {
@@ -187,6 +227,14 @@ export function onPlayerMessage(e: { data: unknown }) {
   try {
     const v = JSON.parse(raw);
     if (!v || typeof v.t !== "number") return;
+    if (v.t === -2) {
+      if (Array.isArray(v.streams)) {
+        streamUrls.set(
+          v.streams.filter((s: unknown) => typeof s === "string"),
+        );
+      }
+      return;
+    }
     if (v.t < 0) return; // heartbeat: bridge alive, no video element yet
     position.set(v.t);
     if (typeof v.d === "number" && v.d > 0) duration.set(v.d);
@@ -278,6 +326,162 @@ export function setRate(rate: number) {
 /** `i` -1 turns subtitles off, else shows track `i` and hides the rest. */
 export function setTrack(i: number) {
   send({ t: "track", i });
+}
+
+// --- Downloads -----------------------------------------------------------------
+//
+// Streambert captures the HLS URL through Electron request interception;
+// the GPUI WebView has none, so the page bridge sniffs the media URLs it
+// fetched (resource timing) and hands them to the app on demand. The
+// actual download is delegated to the vid-dl CLI release the user installs
+// — the app only spawns it with the stream URL and watches its output.
+
+let dlSeq = 0;
+
+function patchDownload(id: number, patch: Partial<DownloadItem>) {
+  downloads.set(downloads().map((d) => (d.id === id ? { ...d, ...patch } : d)));
+}
+
+function failDownload(name: string, message: string) {
+  downloads.set(
+    [{ id: ++dlSeq, name, status: "error", progress: null, message }, ...downloads()].slice(0, 20),
+  );
+}
+
+/** Asks the page for its fetched media URLs and stores the answer. */
+export function refreshStreams() {
+  send({ t: "streams" });
+}
+
+/** Best download candidate: prefer HLS playlists, then progressive mp4. */
+export function bestStreamUrl(): string | null {
+  const list = streamUrls();
+  if (!list.length) return null;
+  return (
+    list.find((u) => /\.m3u8(\?|#|$)/i.test(u)) ??
+    list.find((u) => /\.mp4(\?|#|$)/i.test(u)) ??
+    list[0]
+  );
+}
+
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/** Filename-safe title for the downloaded file. */
+function downloadName(): string {
+  const r = playerRoute();
+  if (!r) return "video";
+  const ep =
+    r.type !== "movie" && r.season
+      ? ` S${r.season}E${r.episode ?? 1}`
+      : r.type !== "movie"
+        ? ` E${r.episode ?? 1}`
+        : "";
+  const base = `${r.title ?? "video"}${ep}`.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120);
+  return base || "video";
+}
+
+/** Progress parsing for the downloader's stdout/stderr lines. */
+function parseDownloadLine(d: DownloadItem, line: string): Partial<DownloadItem> {
+  const frag = line.match(/\(frag\s+(\d+)\s*\/\s*(\d+)\)/i);
+  if (frag) {
+    const n = Number(frag[1]);
+    const total = Number(frag[2]);
+    if (total > 0) {
+      return { progress: Math.min(99, Math.round((n / total) * 100)), message: line.trim().slice(0, 140) };
+    }
+  }
+  const pct = line.match(/\[download\]\s+([\d.]+)%/i);
+  if (pct) {
+    return { progress: Math.min(99, Math.round(Number(pct[1]))), message: line.trim().slice(0, 140) };
+  }
+  const t = line.match(/time=(\d+):(\d+):([\d.]+)/);
+  if (t) {
+    const secs = Number(t[1]) * 3600 + Number(t[2]) * 60 + Number(t[3]);
+    return { progress: null, message: `encoding ${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, "0")}` };
+  }
+  if (/error|failed|exception/i.test(line)) {
+    return { progress: null, message: line.trim().slice(0, 140) };
+  }
+  return {};
+}
+
+/** Spawns the configured vid-dl binary against the current stream URL. */
+export function startDownload() {
+  const name = downloadName();
+  const url = bestStreamUrl();
+  if (!url) {
+    refreshStreams();
+    failDownload(name, "No stream detected yet — let the video play a few seconds, then try again.");
+    return;
+  }
+  let bin = (settings().downloaderPath || "").trim();
+  if (bin === "~" || bin.startsWith("~/")) {
+    bin = `${process.env.HOME ?? ""}${bin.slice(1)}`;
+  }
+  if (!bin) {
+    failDownload(name, "Set the downloader path in Settings first.");
+    return;
+  }
+  let dir = (
+    (settings().downloadDir || "").trim() ||
+    `${process.env.HOME ?? ""}/Downloads/rustflix`
+  ).replace(/\/+$/, "");
+  // `~` doesn't expand inside the single-quoted shell argument.
+  if (dir === "~" || dir.startsWith("~/")) {
+    dir = `${process.env.HOME ?? ""}${dir.slice(1)}`;
+  }
+
+  // The downloader path is user-configured at runtime, so it cannot be
+  // named in capabilities.process.execute: launch it through the shell
+  // (granted) with every argument single-quoted.
+  const inner = [
+    shq(bin), "--cli", shq(url),
+    "-f", shq("mp4 (with Audio)"), "-r", "best", "-b", "320",
+    "-n", shq(name), "-d", shq(dir),
+  ].join(" ");
+  const isWin = process.platform === "windows";
+  const command = isWin ? "cmd.exe" : "/bin/sh";
+  const args = isWin ? ["/c", inner] : ["-c", inner];
+
+  let proc: ReturnType<typeof process.spawn>;
+  try {
+    proc = process.spawn(command, args, { lines: true });
+  } catch (e) {
+    failDownload(name, `Could not start the downloader: ${String(e).slice(0, 140)}`);
+    return;
+  }
+  const id = ++dlSeq;
+  downloads.set(
+    [{ id, name, status: "running", progress: null, message: "starting…", proc: proc as { kill?: () => void } }, ...downloads()].slice(0, 20),
+  );
+  const onLine = (line: string) => {
+    const d = downloads().find((x) => x.id === id);
+    if (!d || d.status !== "running") return;
+    patchDownload(id, parseDownloadLine(d, line));
+  };
+  try {
+    proc.on("stdout", onLine);
+    proc.on("stderr", onLine);
+    proc.on("exit", (res: { code: number | null; signal?: string | null; error?: string }) => {
+      if (res.code === 0) {
+        patchDownload(id, { status: "done", progress: 100, message: "finished" });
+      } else {
+        patchDownload(id, {
+          status: "error",
+          message: res.error || `exited with code ${res.code ?? res.signal ?? "?"}`,
+        });
+      }
+    });
+  } catch {}
+}
+
+/** Kills a running download's process tree. */
+export function cancelDownload(id: number) {
+  const d = downloads().find((x) => x.id === id);
+  patchDownload(id, { status: "error", message: "cancelled" });
+  try {
+    d?.proc?.kill?.();
+  } catch {}
 }
 
 // --- Episodes -----------------------------------------------------------------
@@ -465,10 +669,28 @@ const paletteItems = computed<PaletteItem[]>(() => {
       group: "Playback",
     },
     { id: "ctl:subs", label: "Subtitles", group: "Playback" },
+    {
+      id: "ctl:download",
+      label: downloadLabel(),
+      group: "Playback",
+    },
     { id: "ctl:source", label: "Choose source…", group: "Playback" },
   );
   return items;
 });
+
+/** Palette label for the download command: live progress while running. */
+function downloadLabel(): string {
+  const running = downloads().find((d) => d.status === "running");
+  if (running) {
+    const pct = running.progress != null ? ` ${running.progress}%` : "";
+    return `Downloading ${running.name}${pct}…`;
+  }
+  const last = downloads()[0];
+  if (last && last.status === "done") return "Download again";
+  if (last && last.status === "error") return "Download video (retry)";
+  return "Download video";
+}
 
 const visibleItems = computed<PaletteItem[]>(() => {
   const q = paletteQuery().trim().toLowerCase();
@@ -526,31 +748,31 @@ export function paletteSelect(id: string) {
   }
   if (id.startsWith("speed:")) {
     setRate(Number(id.slice(6)));
-    paletteView.set("root");
-    paletteQuery.set("");
+    closePalette();
     return;
   }
   if (id === "sub:off") {
     setTrack(-1);
-    paletteView.set("root");
-    paletteQuery.set("");
+    closePalette();
     return;
   }
   if (id.startsWith("sub:")) {
     setTrack(Number(id.slice(4)));
-    paletteView.set("root");
-    paletteQuery.set("");
+    closePalette();
     return;
   }
   switch (id) {
     case "ctl:toggle":
       togglePlay();
+      closePalette();
       break;
     case "ctl:back10":
       seekBy(-10);
+      closePalette();
       break;
     case "ctl:fwd10":
       seekBy(10);
+      closePalette();
       break;
     case "ctl:speed":
       paletteView.set("speed");
@@ -563,6 +785,10 @@ export function paletteSelect(id: string) {
     case "ctl:source":
       closePalette();
       showSources.set(true);
+      break;
+    case "ctl:download":
+      startDownload();
+      closePalette();
       break;
   }
 }
@@ -628,6 +854,11 @@ export function closePalette() {
   showPalette.set(false);
   paletteView.set("root");
   paletteQuery.set("");
+  // Hand the keyboard back to the WebView: without a focused view the
+  // next keypress (including Cmd+K) can be dropped until a click.
+  try {
+    webview()?.focus();
+  } catch {}
 }
 
 export function togglePalette() {
@@ -697,6 +928,11 @@ export function startPlayer() {
   lastSaved = 0;
   debug("startPlayer");
   armResume();
+  // Give the embed time to fetch its playlist, then sniff the media URLs
+  // a few times so downloads have a stream to work with.
+  for (const ms of [6000, 15000, 30000]) {
+    setTimeout(refreshStreams, ms);
+  }
 }
 
 export function stopPlayer() {

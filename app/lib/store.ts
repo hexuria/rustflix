@@ -33,6 +33,10 @@ export interface Settings {
   defaultSource: string;
   accent: string;
   subtitleLang: string;
+  /** Path to the vid-dl CLI binary (vid-dl-cli-only release). */
+  downloaderPath: string;
+  /** Folder downloaded files are written to. */
+  downloadDir: string;
 }
 
 const WATCHLIST_KEY = "rustflix.watchlist.v1";
@@ -45,6 +49,8 @@ export const settings = signal<Settings>({
   defaultSource: "vidfast",
   accent: "#e50914",
   subtitleLang: "en",
+  downloaderPath: "",
+  downloadDir: "",
 });
 export const libraryReady = signal(false);
 

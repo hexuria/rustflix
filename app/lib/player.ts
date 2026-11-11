@@ -1168,6 +1168,15 @@ export async function runAutotest(cfg: AutotestConfig) {
     else if (a === "pause") pausePlayback();
     else if (a === "download") startDownload();
     else if (a === "streams") refreshStreams();
+    else if (a === "space") {
+      // GPUI's WebView has no sendInput; dispatch a synthetic keydown the
+      // way the embed's own listener would see a real Space press.
+      try {
+        webview()?.injectJavaScript?.(
+          "(function(){var e=new KeyboardEvent('keydown',{key:' ',code:'Space',keyCode:32,which:32,bubbles:true,cancelable:true});window.dispatchEvent(e);document.dispatchEvent(e);var t=document.activeElement||document.body;if(t)t.dispatchEvent(e);})();",
+        );
+      } catch {}
+    }
     else if (a.startsWith("seekby:")) seekBy(Number(a.slice(7)));
     else if (a.startsWith("rate:")) setRate(Number(a.slice(5)));
     await autotestWait(1600);

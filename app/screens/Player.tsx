@@ -7,7 +7,7 @@
 
 import { computed, effect, Image, platform, signal, Text, View, WebView } from "nsh";
 import { Dialog, Slider } from "nsh/base";
-import { goBack, route } from "../lib/router";
+import { canGoBack, goBack, navigate, route } from "../lib/router";
 import {
   cancelDownload,
   closePalette,
@@ -42,7 +42,9 @@ import {
   seekTo,
   setPageKeysBlocked,
   setRate,
+  setTrack,
   showPalette,
+  subTracks,
   showSources,
   seasons,
   sourceId,
@@ -167,6 +169,18 @@ function MobileControls() {
     setRate(RATES[(i + 1) % RATES.length]);
   };
   const remaining = computed(() => Math.max(0, dur() - position()));
+  const exitPlayer = () => {
+    pokeControls();
+    if (canGoBack()) goBack();
+    else navigate({ name: "home" });
+  };
+  // CC toggles subtitles directly: showing → off, off → first track.
+  const toggleSubs = () => {
+    pokeControls();
+    const tracks = subTracks();
+    if (tracks.some((t) => t.mode === "showing")) setTrack(-1);
+    else if (tracks.length > 0) setTrack(tracks[0].i);
+  };
   return (
     // The toggle lives on the container itself: a full-screen pressable
     // SIBLING underneath the buttons can claim every touch in its bounds
@@ -184,10 +198,7 @@ function MobileControls() {
         <View class="absolute inset-x-0 top-0 flex-row items-center px-3 pt-3">
           <View
             role="button"
-            onPress={() => {
-              pokeControls();
-              goBack();
-            }}
+            onPress={exitPlayer}
             class={`${circle} h-11 w-11`}
             style={glass}
           >
@@ -312,11 +323,7 @@ function MobileControls() {
             </View>
             <View
               role="button"
-              onPress={() => {
-                pokeControls();
-                paletteView.set("subs");
-                openPalette();
-              }}
+              onPress={toggleSubs}
               class={`${circle} h-10 w-10`}
               style={glass}
             >

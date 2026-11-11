@@ -116,6 +116,12 @@ export const PLAYER_BRIDGE = `(function () {
   };
   var fixRate = function (v) {
     if (!v || !v.playbackRate) return;
+    // Native fullscreen (AVPlayerViewController on iOS) owns the rate:
+    // its speed control fires ratechange on the element, and snapping
+    // it back here is what made 2x etc. appear dead.
+    try {
+      if (v.webkitDisplayingFullscreen || document.fullscreenElement === v) return;
+    } catch (e) {}
     var r = v.playbackRate;
     // A rate the app picked is allowed exactly once: the ratechange it
     // causes clears the allowance, so a later spontaneous jump to the

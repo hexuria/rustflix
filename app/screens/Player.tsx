@@ -10,6 +10,7 @@ import { Slider } from "nsh/base";
 import { goBack, route } from "../lib/router";
 import {
   cancelDownload,
+  closePalette,
   debug,
   downloads,
   episodes,
@@ -17,6 +18,7 @@ import {
   loadEpisodes,
   mediaFullscreen,
   mediaPaused,
+  mediaRate,
   nextEpisode,
   onPlayerMessage,
   openPalette,
@@ -28,7 +30,6 @@ import {
   pickSource,
   playPlayback,
   enterFullscreen,
-  setPageControls,
   position,
   duration,
   armBridge,
@@ -38,6 +39,7 @@ import {
   prevEpisode,
   seekTo,
   setPageKeysBlocked,
+  setRate,
   showPalette,
   showSources,
   seasons,
@@ -304,15 +306,11 @@ export function Player() {
   const r = computed(() => playerRoute());
   const overlay = computed(() => showPalette() || showSources());
 
-  // Desktop: the web view is a native child above all GPUI content, so
-  // the control bar lives in the page's own DOM. It must be re-sent after
-  // every page load (each document gets a fresh bridge) and when the
-  // title changes (the top bar shows it).
-  effect(() => {
-    if (!platform.desktop) return;
-    const u = src();
-    if (u) setPageControls(true, r()?.title ?? "");
-  });
+  // NOTE: an in-page control bar was tried and removed — on GPUI/macOS
+  // the GPUIView sits above the WKWebView and swallows every mouse event
+  // (verified: the page's click counter never increments), so nothing
+  // injected into the page can be clicked. Desktop controls live in the
+  // GPUI bottom bar below; they drive playback through the JS bridge.
 
   // iOS blocks the embed's autoplay; a programmatic play() once the page
   // has settled works (verified against WKWebView), so retry it once —
@@ -355,10 +353,25 @@ export function Player() {
       .slice(0, 2),
   );
   const mobile = !platform.desktop;
-  // Touch devices get the auto-hiding overlay controls instead of a
-  // permanent strip; the strip stays for desktop (next episode,
-  // downloads).
-  const showBar = computed(() => !mobile && (canNext() || recentDownloads().length > 0));
+  // Touch devices get the auto-hiding overlay controls instead; desktop
+  // gets a permanent GPUI transport bar — the only place clicks can
+  // reach, since the web view swallows all mouse input over the video.
+  const showBar = computed(() => !mobile);
+  const isPaused = computed(() => mediaPaused());
+  const dur = computed(() => duration());
+  const rate = computed(() => mediaRate());
+  const pct = computed(() => {
+    const drag = seekDrag();
+    if (drag != null) return drag;
+    const d = duration();
+    return d > 0 ? Math.min(100, (position() / d) * 100) : 0;
+  });
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  const cycleRate = () => {
+    const cur = rate();
+    const i = RATES.findIndex((x) => Math.abs(x - cur) < 0.01);
+    setRate(RATES[(i + 1) % RATES.length]);
+  };
   const paletteWidth = platform.select({ desktop: 620 });
   const sourcesWidth = platform.select({ desktop: 560 });
 
@@ -392,9 +405,6 @@ export function Player() {
                 onLoad={(e: unknown) => {
                   debug("wv:load", e);
                   armBridge();
-                  // Fresh document = fresh bridge state: re-enable the
-                  // in-page control bar (desktop only).
-                  if (platform.desktop) setPageControls(true, r()?.title ?? "");
                 }}
                 onError={(e: unknown) => debug("wv:error", e)}
               />
@@ -430,6 +440,13 @@ export function Player() {
                   <If when={platform.desktop}>
                     <Text class="text-[11px] text-zinc-600">esc</Text>
                   </If>
+                  <View
+                    role="button"
+                    onPress={closePalette}
+                    class="rounded-md px-2 py-1 active:bg-zinc-800"
+                  >
+                    <Text class="text-sm font-bold text-zinc-400">✕</Text>
+                  </View>
                 </View>
                 {/* The palette owns the keyboard through keymap bindings
                     (bound on open, removed on close) — no text field, so
@@ -494,8 +511,15 @@ export function Player() {
                 class="flex flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900"
                 style={{ width: sourcesWidth ?? "92%", height: "55%" }}
               >
-                <View class="border-b border-zinc-800 px-4 py-3">
-                  <Text class="text-sm font-bold text-zinc-100">Sources</Text>
+                <View class="flex-row items-center border-b border-zinc-800 px-4 py-3">
+                  <Text class="flex-1 text-sm font-bold text-zinc-100">Sources</Text>
+                  <View
+                    role="button"
+                    onPress={() => showSources.set(false)}
+                    class="rounded-md px-2 py-1 active:bg-zinc-800"
+                  >
+                    <Text class="text-sm font-bold text-zinc-400">✕</Text>
+                  </View>
                 </View>
                 <View class="flex-1 overflow-y-auto p-1.5">
                   <Each of={sourcesFor((r()?.type ?? "movie") as MediaType)}>
@@ -533,50 +557,132 @@ export function Player() {
         </If>
       </View>
 
-      {/* Bottom bar: download status + next episode (the embed player
-          owns its own timeline — no duplicate progress UI). Touch
-          devices use the auto-hiding overlay instead. */}
+      {/* Bottom bar (desktop): transport controls + download status +
+          next episode. Every button drives the page through the JS
+          bridge — the only input path, since the web view swallows all
+          mouse events over the video area. Touch devices use the
+          auto-hiding overlay instead. */}
       <If when={showBar()}>
-        <View class="flex-row items-center gap-3 border-t border-zinc-800 bg-zinc-950 px-3 py-2">
-          <View class="flex-1 flex-col gap-0.5">
-            <Each of={recentDownloads()}>
-              {(d) => (
-                <View class="flex-row items-center gap-2">
-                  <Text
-                    class={
-                      d().status === "running"
-                        ? "text-xs text-sky-400"
-                        : d().status === "done"
-                          ? "text-xs text-green-500"
-                          : "text-xs text-red-400"
-                    }
-                  >
-                    {d().status === "running"
-                      ? `↓ ${d().name}${d().progress != null ? ` ${d().progress}%` : ""}`
-                      : d().status === "done"
-                        ? `✓ ${d().name} — downloaded`
-                        : `✗ ${d().name} — ${d().message.slice(0, 60)}`}
-                  </Text>
-                  <If when={d().status === "running"}>
-                    <View
-                      role="button"
-                      onPress={() => cancelDownload(d().id)}
-                      class="rounded px-1.5 py-0.5 active:bg-zinc-800"
-                    >
-                      <Text class="text-[10px] text-zinc-500">cancel</Text>
-                    </View>
-                  </If>
-                </View>
-              )}
-            </Each>
-          </View>
-          <If when={canNext()}>
+        <View class="flex-col border-t border-zinc-800 bg-zinc-950">
+          <View class="flex-row items-center gap-1 px-3 py-2">
             <View
               role="button"
-              onPress={() => void nextEpisode()}
-              class="rounded-lg bg-red-600 px-4 py-1.5"
+              onPress={togglePlay}
+              class="flex-row items-center justify-center rounded-md px-2.5 py-1.5 active:bg-zinc-800"
             >
-              <Text class="text-sm font-bold text-white">Next Episode ›</Text>
+              <Text class="text-sm font-bold text-zinc-200">
+                {isPaused() ? "▶" : "⏸"}
+              </Text>
+            </View>
+            <View
+              role="button"
+              onPress={() => seekBy(-10)}
+              class="flex-row items-center justify-center rounded-md px-2 py-1.5 active:bg-zinc-800"
+            >
+              <Text class="text-xs font-bold text-zinc-300">−10</Text>
+            </View>
+            <View
+              role="button"
+              onPress={() => seekBy(10)}
+              class="flex-row items-center justify-center rounded-md px-2 py-1.5 active:bg-zinc-800"
+            >
+              <Text class="text-xs font-bold text-zinc-300">+10</Text>
+            </View>
+            <Text class="w-10 text-right text-[11px] font-medium text-zinc-400">
+              {fmtTime(position())}
+            </Text>
+            <Slider
+              value={pct()}
+              onChange={({ value }) => seekDrag.set(Number(value))}
+              onChangeEnd={({ value }) => {
+                const d = duration();
+                seekTo((Number(value) / 100) * d);
+                seekDrag.set(null);
+              }}
+              accessibilityLabel="Seek"
+              class="flex-1"
+              trackClass="h-1 flex-1 rounded-full bg-zinc-700"
+              indicatorClass="h-full"
+              rangeClass="rounded-full bg-red-600"
+              thumbClass="h-3 w-3 rounded-full bg-white"
+            />
+            <Text class="w-10 text-[11px] font-medium text-zinc-400">
+              {fmtTime(dur())}
+            </Text>
+            <View
+              role="button"
+              onPress={cycleRate}
+              class="flex-row items-center justify-center rounded-md px-2 py-1.5 active:bg-zinc-800"
+            >
+              <Text class="text-xs font-bold text-zinc-300">
+                {Math.round(rate() * 100) / 100}x
+              </Text>
+            </View>
+            <View
+              role="button"
+              onPress={enterFullscreen}
+              class="flex-row items-center justify-center rounded-md px-2 py-1.5 active:bg-zinc-800"
+            >
+              <Text class="text-sm font-bold text-zinc-300">⛶</Text>
+            </View>
+            <View
+              role="button"
+              onPress={() => showSources.set(true)}
+              class="flex-row items-center justify-center rounded-md px-2 py-1.5 active:bg-zinc-800"
+            >
+              <Text class="text-sm font-bold text-zinc-300">⇄</Text>
+            </View>
+            <View
+              role="button"
+              onPress={openPalette}
+              class="flex-row items-center justify-center rounded-md px-2 py-1.5 active:bg-zinc-800"
+            >
+              <Text class="text-sm font-bold text-zinc-300">⋯</Text>
+            </View>
+          </View>
+          <If when={canNext() || recentDownloads().length > 0}>
+            <View class="flex-row items-center gap-3 border-t border-zinc-800/60 px-3 py-1.5">
+              <View class="flex-1 flex-col gap-0.5">
+                <Each of={recentDownloads()}>
+                  {(d) => (
+                    <View class="flex-row items-center gap-2">
+                      <Text
+                        class={
+                          d().status === "running"
+                            ? "text-xs text-sky-400"
+                            : d().status === "done"
+                              ? "text-xs text-green-500"
+                              : "text-xs text-red-400"
+                        }
+                      >
+                        {d().status === "running"
+                          ? `↓ ${d().name}${d().progress != null ? ` ${d().progress}%` : ""}`
+                          : d().status === "done"
+                            ? `✓ ${d().name} — downloaded`
+                            : `✗ ${d().name} — ${d().message.slice(0, 60)}`}
+                      </Text>
+                      <If when={d().status === "running"}>
+                        <View
+                          role="button"
+                          onPress={() => cancelDownload(d().id)}
+                          class="rounded px-1.5 py-0.5 active:bg-zinc-800"
+                        >
+                          <Text class="text-[10px] text-zinc-500">cancel</Text>
+                        </View>
+                      </If>
+                    </View>
+                  )}
+                </Each>
+              </View>
+              <If when={canNext()}>
+                <View
+                  role="button"
+                  onPress={() => void nextEpisode()}
+                  class="rounded-lg bg-red-600 px-4 py-1.5"
+                >
+                  <Text class="text-sm font-bold text-white">Next Episode ›</Text>
+                </View>
+              </If>
             </View>
           </If>
         </View>

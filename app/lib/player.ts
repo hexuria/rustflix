@@ -17,7 +17,7 @@ import { computed, keymap, signal, Storage } from "nsh";
 import type { WebViewRef } from "nsh";
 import process from "process";
 import { aniDetails } from "./anilist";
-import { goBack, navigate, route, setLeaveHook, type Route } from "./router";
+import { navigate, route, setLeaveHook, type Route } from "./router";
 import { getSourceUrl, PLAYER_SOURCES, type MediaType } from "./sources";
 import { itemKey, progress, saveProgress, settings } from "./store";
 import { externalIds, seasonDetails, tvDetails, type Episode } from "./tmdb";
@@ -91,8 +91,14 @@ export const PLAYER_BRIDGE = `(function () {
   // actions (back, sources, palette, episodes) through the report
   // channel as {t:-7,a:…}.
   var ctlOn = false, ctlEl = null, ctlDrag = false, ctlHideT = null;
-  var ctlTitle = '', ctlSlider = null, ctlTime = null, ctlPlay = null;
-  var ctlRate = null, ctlMute = null, ctlRateIdx = 2;
+  var ctlSlider = null, ctlTime = null, ctlPlay = null;
+  var ctlRate = null, ctlMute = null;
+  // In-page source picker (desktop): a real modal inside the page —
+  // GPUI cannot draw over the web view, and the in-flow card used to
+  // shrink the video.
+  var srcmEl = null;
+  var clkN = 0;
+  document.addEventListener('click', function () { clkN++; }, true);
   // The real player is usually the video with the most readyState +
   // duration; pages can carry preview/hover videos too.
   var pickVideo = function () {
@@ -216,9 +222,18 @@ export const PLAYER_BRIDGE = `(function () {
     }
     if (m.t === 'ctl') {
       ctlOn = !!m.on;
-      if (m.title) ctlTitle = m.title;
       if (ctlOn) { ctlBuild(); ctlShow(); }
       else ctlRemove();
+      return;
+    }
+    if (m.t === 'srcm') {
+      srcBuild();
+      if (m.on) {
+        srcFill(m.items || [], m.active || '');
+        srcmEl.style.display = 'flex';
+      } else if (srcmEl) {
+        srcmEl.style.display = 'none';
+      }
       return;
     }
     if (m.t === 'streams') {
@@ -339,15 +354,6 @@ export const PLAYER_BRIDGE = `(function () {
                'background:linear-gradient(to top,rgba(0,0,0,.78),transparent);');
       return d;
     };
-    var topBar = bar(true);
-    topBar.appendChild(ctlBtn('\u2039', 'Back', function () { ctlUi('back'); }));
-    var ttl = document.createElement('div');
-    ttl.style.cssText = 'flex:1;color:#fff;font:600 13px/1.3 system-ui,-apple-system,sans-serif;' +
-      'padding:0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-    ttl.textContent = ctlTitle || document.title || '';
-    topBar.appendChild(ttl);
-    topBar.appendChild(ctlBtn('\u21c4', 'Sources', function () { ctlUi('sources'); }));
-    topBar.appendChild(ctlBtn('\u22ef', 'Controls', function () { ctlUi('palette'); }));
     var botBar = bar(false);
     ctlPlay = ctlBtn('\u25b6', 'Play/Pause', function () {
       var v = pickVideo(); if (v) { try { v.paused ? v.play() : v.pause(); } catch (e) {} }
@@ -393,7 +399,6 @@ export const PLAYER_BRIDGE = `(function () {
       var i = 0;
       for (var k = 0; k < ctlRates.length; k++) if (Math.abs(ctlRates[k] - cur) < 0.01) i = k;
       i = (i + 1) % ctlRates.length;
-      ctlRateIdx = i;
       allowedRate = ctlRates[i];
       try { v.playbackRate = ctlRates[i]; } catch (e) {}
     });
@@ -410,11 +415,78 @@ export const PLAYER_BRIDGE = `(function () {
         else if (v.requestFullscreen) v.requestFullscreen();
       } catch (e) {}
     }));
-    wrap.appendChild(topBar);
     wrap.appendChild(botBar);
     (document.body || document.documentElement).appendChild(wrap);
     ctlEl = wrap;
   };
+  // --- In-page source picker ---------------------------------------------
+  var srcUi = function (a) { report(JSON.stringify({ t: -7, a: a })); };
+  var srcBuild = function () {
+    if (srcmEl && srcmEl.isConnected) return;
+    var wrap = document.createElement('div');
+    wrap.id = 'rf-srcm';
+    wrap.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;' +
+      'display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);';
+    var card = document.createElement('div');
+    card.style.cssText = 'width:min(420px,86vw);max-height:70vh;overflow-y:auto;' +
+      'background:#18181b;border:1px solid #27272a;border-radius:12px;color:#fff;' +
+      'font:14px system-ui,-apple-system,sans-serif;';
+    var head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+      'padding:14px 16px;border-bottom:1px solid #27272a;font-weight:700;';
+    var h = document.createElement('span');
+    h.textContent = 'Sources';
+    head.appendChild(h);
+    var x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '\u2715';
+    x.style.cssText = 'cursor:pointer;border:0;background:none;color:#a1a1aa;font-size:16px;padding:2px 6px;';
+    x.onclick = function () { srcUi('srcx'); };
+    head.appendChild(x);
+    var list = document.createElement('div');
+    list.id = 'rf-srcm-list';
+    list.style.cssText = 'padding:8px;';
+    card.appendChild(head);
+    card.appendChild(list);
+    wrap.appendChild(card);
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) srcUi('srcx'); });
+    (document.body || document.documentElement).appendChild(wrap);
+    srcmEl = wrap;
+  };
+  var srcFill = function (items, active) {
+    if (!srcmEl) return;
+    var list = srcmEl.querySelector('#rf-srcm-list');
+    if (!list) return;
+    list.innerHTML = '';
+    for (var i = 0; i < items.length; i++) {
+      (function (it) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.style.cssText = 'display:block;width:100%;text-align:left;cursor:pointer;border:0;' +
+          'border-radius:8px;background:' + (it.id === active ? 'rgba(229,9,20,.18)' : 'transparent') + ';' +
+          'color:#fff;padding:10px 12px;margin:2px 0;font:500 14px system-ui,-apple-system,sans-serif;';
+        var name = document.createElement('div');
+        name.textContent = it.label + (it.id === active ? '  \u2713' : '');
+        b.appendChild(name);
+        if (it.note || it.warn) {
+          var sub = document.createElement('div');
+          sub.style.cssText = 'font-size:11px;color:' + (it.warn ? '#f59e0b' : '#71717a') + ';margin-top:2px;';
+          sub.textContent = it.warn ? 'may not load' : (it.note || '');
+          b.appendChild(sub);
+        }
+        b.onmouseenter = function () { b.style.background = 'rgba(255,255,255,.08)'; };
+        b.onmouseleave = function () { b.style.background = it.id === active ? 'rgba(229,9,20,.18)' : 'transparent'; };
+        b.onclick = function () { srcUi('src:' + it.id); };
+        list.appendChild(b);
+      })(items[i]);
+    }
+  };
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && srcmEl && srcmEl.style.display !== 'none') {
+      e.stopPropagation();
+      srcUi('srcx');
+    }
+  }, true);
   var ctlRemove = function () {
     if (ctlEl && ctlEl.parentNode) ctlEl.parentNode.removeChild(ctlEl);
     ctlEl = null;
@@ -508,6 +580,7 @@ export const PLAYER_BRIDGE = `(function () {
     report(JSON.stringify({
       t: t, d: d, p: !!v.paused, r: r, f: f, tracks: tracks,
       ctl: ctlOn ? (ctlEl && ctlEl.isConnected ? (ctlEl.className === 'rf-on' ? 2 : 1) : 0) : -1,
+      clk: clkN,
     }));
   }, 1500);
   // Boot beacon: proves the injected script ran at all, even if the
@@ -621,12 +694,13 @@ export function onPlayerMessage(e: { data: unknown }) {
       return;
     }
     if (v.t === -7) {
-      // A button on the in-page control bar asked for an app action.
+      // A button on an in-page overlay asked for an app action.
       const a = v.a;
-      if (a === "back") goBack();
-      else if (a === "sources") showSources.set(!showSources());
-      else if (a === "palette") openPalette();
-      else if (a === "prev") void prevEpisode();
+      if (typeof a === "string" && a.startsWith("src:")) {
+        pickSource(a.slice(4));
+      } else if (a === "srcx") {
+        showSources.set(false);
+      } else if (a === "prev") void prevEpisode();
       else if (a === "next") void nextEpisode();
       return;
     }
@@ -789,6 +863,17 @@ export function seekTo(sec: number) {
  * the bar must live inside the page's own DOM to sit over the video. */
 export function setPageControls(on: boolean, title?: string) {
   send({ t: "ctl", on, title });
+}
+
+/** Shows or hides the in-page source picker modal (desktop: GPUI cannot
+ * draw over the web view, so the picker lives in the page like the
+ * control bar). `items` are the sources for the current title type. */
+export function setSourcesModal(
+  on: boolean,
+  items: { id: string; label: string; note?: string; warn?: boolean }[],
+  active?: string,
+) {
+  send({ t: "srcm", on, items, active });
 }
 
 export function setRate(rate: number) {
@@ -1559,6 +1644,7 @@ export function stopPlayer() {
   if (resumeTimer) clearInterval(resumeTimer);
   resumeTimer = undefined;
   send({ t: "ctl", on: false });
+  send({ t: "srcm", on: false });
 }
 
 // Leaving the player (any navigation): save the last known position and

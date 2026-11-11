@@ -152,6 +152,9 @@ export const search = (q: string) =>
 export const movieDetails = (id: number) => tmdb<TitleDetails>(`/movie/${id}`);
 export const tvDetails = (id: number) => tmdb<TitleDetails>(`/tv/${id}`);
 
+export const externalIds = (kind: "movie" | "tv", id: number) =>
+  tmdb<{ imdb_id?: string | null }>(`/${kind}/${id}/external_ids`);
+
 export const seasonDetails = (id: number, season: number) =>
   tmdb<{ episodes: Episode[] }>(`/tv/${id}/season/${season}`);
 

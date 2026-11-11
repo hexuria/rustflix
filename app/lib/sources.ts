@@ -12,6 +12,8 @@ export interface Source {
   note: string | null;
   movieOnly?: boolean;
   supportsAnime?: boolean;
+  /** Some embeds key on IMDb rather than the TMDB id. */
+  idType?: "imdb";
   colorParam: string | null;
   colorWithHash?: boolean;
   langParam: string | null;
@@ -101,6 +103,7 @@ export const PLAYER_SOURCES: Source[] = [
     label: "DeVideoSrc",
     tag: null,
     note: "DE",
+    idType: "imdb",
     colorParam: "color",
     colorWithHash: true,
     langParam: null,
@@ -147,6 +150,8 @@ export interface PlayRequest {
   poster?: string;
   /** sub | dub for anime. */
   lang?: "sub" | "dub";
+  /** Resolved external id (IMDb) for sources whose `idType` needs one. */
+  overrideId?: string;
 }
 
 export function getSourceUrl(
@@ -163,6 +168,7 @@ export function getSourceUrl(
   if (req.type !== "anime" && req.type !== "movie" && src.movieOnly) return null;
 
   let baseUrl: string;
+  const idStr = req.overrideId ?? String(req.id);
   if (req.type === "anime") {
     baseUrl = src.animeUrl!(req.id, req.episode ?? 1, req.lang ?? "sub");
   } else {
@@ -170,8 +176,8 @@ export function getSourceUrl(
     const e = req.type === "tv" ? (req.episode ?? 1) : 0;
     baseUrl =
       req.type === "movie"
-        ? src.movieUrl(String(req.id))
-        : src.tvUrl!(String(req.id), s, e);
+        ? src.movieUrl(idStr)
+        : src.tvUrl!(idStr, s, e);
   }
 
   const url = new URL(baseUrl);

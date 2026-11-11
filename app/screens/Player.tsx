@@ -11,6 +11,7 @@ import {
   cancelDownload,
   downloads,
   episodes,
+  extLoading,
   loadEpisodes,
   nextEpisode,
   onPlayerMessage,
@@ -23,6 +24,7 @@ import {
   PLAYER_BRIDGE,
   playerRoute,
   playerUrl,
+  setPageKeysBlocked,
   showPalette,
   showSources,
   seasons,
@@ -58,14 +60,11 @@ export function Player() {
     }
   });
 
-  // The WebView keeps keyboard focus otherwise — keys could keep
-  // reaching the page while the palette owns them through keymap.
+  // While an overlay card owns the keyboard, the page must not also act
+  // on the same keys: the native web view keeps first responder (GPUI's
+  // blur() cannot resign it), so the bridge swallows keys page-side.
   effect(() => {
-    if (showPalette()) {
-      try {
-        webview()?.blur();
-      } catch {}
-    }
+    setPageKeysBlocked(showPalette() || showSources());
   });
 
   const src = computed(() => playerUrl());
@@ -98,11 +97,13 @@ export function Player() {
   return (
     <View class="flex-1 bg-black">
       <View class="flex-1 flex-col">
-        {/* Video area: collapsed while an overlay card is open so the
-            card can sit in-flow (the WebView itself stays mounted). */}
+        {/* Video area: shrunk while an overlay card is open so the card
+            can sit in-flow (the WebView itself stays mounted). It must
+            NOT collapse to zero — a hidden/zero-size web view suspends
+            page JS, which kills the bridge's reports and commands. */}
         <View
           class={overlay() ? "overflow-hidden" : "flex-1"}
-          style={overlay() ? { height: 0 } : undefined}
+          style={overlay() ? { height: "44%" } : undefined}
         >
           <If when={src()}>
             {(u) => (
@@ -118,7 +119,9 @@ export function Player() {
           </If>
           <If when={!src()}>
             <View class="flex-1 items-center justify-center">
-              <Text class="text-zinc-400">This source cannot play this title.</Text>
+              <Text class="text-zinc-400">
+                {extLoading() ? "Loading source…" : "This source cannot play this title."}
+              </Text>
             </View>
           </If>
         </View>

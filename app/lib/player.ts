@@ -18,9 +18,9 @@ import type { WebViewRef } from "nsh";
 import process from "process";
 import { aniDetails } from "./anilist";
 import { navigate, route, setLeaveHook, type Route } from "./router";
-import { getSourceUrl, type MediaType } from "./sources";
+import { getSourceUrl, PLAYER_SOURCES, type MediaType } from "./sources";
 import { itemKey, progress, saveProgress, settings } from "./store";
-import { seasonDetails, tvDetails, type Episode } from "./tmdb";
+import { externalIds, seasonDetails, tvDetails, type Episode } from "./tmdb";
 
 export type PlayerRoute = Extract<Route, { name: "player" }>;
 
@@ -74,6 +74,7 @@ export const PLAYER_BRIDGE = `(function () {
   var stdRates = { 0.5: 1, 0.75: 1, 1: 1, 1.25: 1, 1.5: 1 };
   var allowedRate = null;
   var pendingSeek = null;
+  var keyBlock = null;
   // The real player is usually the video with the most readyState +
   // duration; pages can carry preview/hover videos too.
   var pickVideo = function () {
@@ -91,7 +92,11 @@ export const PLAYER_BRIDGE = `(function () {
   var fixRate = function (v) {
     if (!v || !v.playbackRate) return;
     var r = v.playbackRate;
-    if (r === allowedRate || stdRates[r]) return;
+    // A rate the app picked is allowed exactly once: the ratechange it
+    // causes clears the allowance, so a later spontaneous jump to the
+    // same value by the embed is snapped back.
+    if (r === allowedRate) { allowedRate = null; return; }
+    if (stdRates[r]) return;
     try { v.playbackRate = allowedRate || 1; } catch (e) {}
   };
   document.addEventListener('play', function (e) { fixRate(e.target); }, true);
@@ -101,6 +106,33 @@ export const PLAYER_BRIDGE = `(function () {
     try { m = JSON.parse(e.data); } catch (err) { return; }
     if (!m) return;
     if (m.t === 'seek' && typeof m.p === 'number') { pendingSeek = m.p; return; }
+    if (m.t === 'keys') {
+      // While an app overlay (palette / source picker) owns the keyboard,
+      // swallow every key in the page so the embed can't also act on it —
+      // ViewRef.blur() cannot resign the native web view's first
+      // responder, so without this space toggles playback AND filters.
+      if (m.on && !keyBlock) {
+        keyBlock = function (e) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        };
+        window.addEventListener('keydown', keyBlock, true);
+        window.addEventListener('keyup', keyBlock, true);
+        window.addEventListener('keypress', keyBlock, true);
+        document.addEventListener('keydown', keyBlock, true);
+        document.addEventListener('keyup', keyBlock, true);
+        document.addEventListener('keypress', keyBlock, true);
+      } else if (!m.on && keyBlock) {
+        window.removeEventListener('keydown', keyBlock, true);
+        window.removeEventListener('keyup', keyBlock, true);
+        window.removeEventListener('keypress', keyBlock, true);
+        document.removeEventListener('keydown', keyBlock, true);
+        document.removeEventListener('keyup', keyBlock, true);
+        document.removeEventListener('keypress', keyBlock, true);
+        keyBlock = null;
+      }
+      return;
+    }
     if (m.t === 'streams') {
       // On-demand: collect media URLs the page has fetched (m3u8/mp4/mpd)
       // from resource timing plus the picked video's own src, for the
@@ -284,14 +316,21 @@ export function persist() {
 export function playerUrl(): string | null {
   const r = playerRoute();
   if (!r) return null;
+  const sid = sourceId();
+  const src = PLAYER_SOURCES.find((s) => s.id === sid);
+  // Sources keyed on IMDb need the external id resolved first; until it
+  // is, there is no URL (the screen shows a loading state).
+  const overrideId = src?.idType === "imdb" ? extId() : undefined;
+  if (src?.idType === "imdb" && !overrideId) return null;
   return getSourceUrl(
-    sourceId(),
+    sid,
     {
       type: r.type as MediaType,
       id: r.id,
       season: r.season,
       episode: r.episode,
       lang: r.lang,
+      overrideId,
     },
     {},
     settings().accent,
@@ -299,9 +338,52 @@ export function playerUrl(): string | null {
   );
 }
 
+// --- External ids (IMDb for sources that key on it) ----------------------------
+
+/** `${type}:${id}` → resolved IMDb id ("tt…"). */
+const extIds = new Map<string, string>();
+const extPending = new Map<string, Promise<void>>();
+export const extId = signal("");
+export const extLoading = signal(false);
+
+/** Fetches the IMDb id for the current title when the chosen source
+ * needs it. Safe to call on every player open — cached per title. */
+export async function ensureExtId(r: PlayerRoute) {
+  const src = PLAYER_SOURCES.find((s) => s.id === sourceId());
+  if (src?.idType !== "imdb" || r.type === "anime") {
+    extId.set("");
+    extLoading.set(false);
+    return;
+  }
+  const key = `${r.type}:${r.id}`;
+  const cached = extIds.get(key);
+  if (cached) {
+    extId.set(cached);
+    extLoading.set(false);
+    return;
+  }
+  extLoading.set(true);
+  extId.set("");
+  let p = extPending.get(key);
+  if (!p) {
+    p = (async () => {
+      try {
+        const ids = await externalIds(r.type === "tv" ? "tv" : "movie", r.id);
+        if (ids.imdb_id) extIds.set(key, ids.imdb_id);
+      } catch {}
+    })().finally(() => extPending.delete(key));
+    extPending.set(key, p);
+  }
+  await p;
+  extId.set(extIds.get(key) ?? "");
+  extLoading.set(false);
+}
+
 export function pickSource(id: string) {
   sourceId.set(id);
   showSources.set(false);
+  const r = playerRoute();
+  if (r) void ensureExtId(r);
 }
 
 // --- Media commands (messages into the page's bridge) -------------------------
@@ -343,6 +425,7 @@ function patchDownload(id: number, patch: Partial<DownloadItem>) {
 }
 
 function failDownload(name: string, message: string) {
+  debug("download: fail", { name, message });
   downloads.set(
     [{ id: ++dlSeq, name, status: "error", progress: null, message }, ...downloads()].slice(0, 20),
   );
@@ -351,6 +434,13 @@ function failDownload(name: string, message: string) {
 /** Asks the page for its fetched media URLs and stores the answer. */
 export function refreshStreams() {
   send({ t: "streams" });
+}
+
+/** Blocks (or unblocks) every key inside the player page while an app
+ * overlay owns the keyboard — the native web view keeps first responder
+ * and would otherwise act on the same keystrokes. */
+export function setPageKeysBlocked(on: boolean) {
+  send({ t: "keys", on });
 }
 
 /** Best download candidate: prefer HLS playlists, then progressive mp4. */
@@ -407,6 +497,14 @@ function parseDownloadLine(d: DownloadItem, line: string): Partial<DownloadItem>
 
 /** Spawns the configured vid-dl binary against the current stream URL. */
 export function startDownload() {
+  try {
+    startDownloadInner();
+  } catch (e) {
+    failDownload(downloadName(), `Download failed: ${String(e).slice(0, 140)}`);
+  }
+}
+
+function startDownloadInner() {
   const name = downloadName();
   const url = bestStreamUrl();
   if (!url) {
@@ -451,6 +549,7 @@ export function startDownload() {
     return;
   }
   const id = ++dlSeq;
+  debug("download: start", { name, url: url.slice(0, 120), bin, dir });
   downloads.set(
     [{ id, name, status: "running", progress: null, message: "starting…", proc: proc as { kill?: () => void } }, ...downloads()].slice(0, 20),
   );
@@ -928,6 +1027,8 @@ export function startPlayer() {
   lastSaved = 0;
   debug("startPlayer");
   armResume();
+  const r = playerRoute();
+  if (r) void ensureExtId(r);
   // Give the embed time to fetch its playlist, then sniff the media URLs
   // a few times so downloads have a stream to work with.
   for (const ms of [6000, 15000, 30000]) {

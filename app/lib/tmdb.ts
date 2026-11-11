@@ -64,6 +64,12 @@ export interface Genre {
 
 const apiKey = signal("");
 let bearer = false;
+
+// Shipped in the bundle so TestFlight beta users never see setup. The
+// IPA is extractable, so this key is public-by-distribution: fine for a
+// private beta, rotate it in TMDB settings if it is ever abused.
+const BUNDLED_KEY =
+  "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI2NjRkN2M3Mjg0MWY4YzQ1NzNmODJiY2JhYTZiZWZlYSIsIm5iZiI6MTc3OTA3NzI1OC45MTY5OTk4LCJzdWIiOiI2YTBhOTA4YWEwMTNkNGNmYjdiNmYyOWEiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.4TdyZEMgKaq7kWvG1HYMbLGb8ww7gSe-5KC9mKXD0ag";
 const cache = new Map<string, { data: unknown; expires: number }>();
 
 export function imgUrl(path: string | null | undefined, size = "w500"): string {
@@ -73,7 +79,7 @@ export function imgUrl(path: string | null | undefined, size = "w500"): string {
 export async function loadKey(): Promise<string> {
   if (apiKey()) return apiKey();
   const saved = await Storage.getItem(KEY_STORAGE);
-  if (saved) setKey(saved);
+  setKey(saved || BUNDLED_KEY);
   return apiKey();
 }
 

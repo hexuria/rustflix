@@ -71,7 +71,13 @@ let handledRoute = "";
 // chrome auto-hides a few seconds after the last interaction.
 const controlsVisible = signal(true);
 const seekDrag = signal<number | null>(null);
+// Double-tap seek: which side was tapped and the running +10 count —
+// consecutive same-side double-taps within 2s accumulate like YouTube's.
+const seekFlash = signal<{ label: string; left: boolean } | null>(null);
+const overlaySize = signal({ w: 0, h: 0 });
 let hideTimer: ReturnType<typeof setTimeout> | undefined;
+let flashTimer: ReturnType<typeof setTimeout> | undefined;
+let lastTap = { dir: 0, at: 0, count: 0 };
 
 function pokeControls() {
   controlsVisible.set(true);
@@ -181,6 +187,31 @@ function MobileControls() {
     if (tracks.some((t) => t.mode === "showing")) setTrack(-1);
     else if (tracks.length > 0) setTrack(tracks[0].i);
   };
+  const subsOn = computed(() => subTracks().some((t) => t.mode === "showing"));
+  // Single tap toggles the chrome; a double tap seeks ±10s on the side
+  // tapped and flashes a cumulative counter that resets after ~2s idle.
+  const onTap = (e: { position?: { x: number }; clickCount?: number }) => {
+    if ((e?.clickCount ?? 1) >= 2) {
+      const w = overlaySize().w || 1;
+      const x = e?.position?.x ?? w / 2;
+      const dir = x < w / 2 ? -1 : 1;
+      const now = Date.now();
+      lastTap.count =
+        lastTap.dir === dir && now - lastTap.at < 2000 ? lastTap.count + 1 : 1;
+      lastTap.dir = dir;
+      lastTap.at = now;
+      pokeControls();
+      seekBy(dir * 10);
+      seekFlash.set({
+        label: `${dir > 0 ? "+" : "−"}${lastTap.count * 10}`,
+        left: dir < 0,
+      });
+      if (flashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => seekFlash.set(null), 900);
+      return;
+    }
+    tapControls();
+  };
   return (
     // The toggle lives on the container itself: a full-screen pressable
     // SIBLING underneath the buttons can claim every touch in its bounds
@@ -190,55 +221,28 @@ function MobileControls() {
     <View
       class="absolute inset-0"
       style={{ backgroundColor: "rgba(0,0,0,0.01)" }}
-      onPress={tapControls}
+      onLayout={(e) =>
+        overlaySize.set({ w: e.bounds.width, h: e.bounds.height })
+      }
+      onPress={onTap}
     >
+      {/* Double-tap seek flash: lives outside the chrome so it shows
+          while the controls are hidden. */}
+      <If when={seekFlash()}>
+        {(f) => (
+          <View
+            class={`pointer-events-none absolute inset-y-0 ${
+              f().left ? "left-0 justify-start pl-12" : "right-0 justify-end pr-12"
+            } flex-col items-center justify-center`}
+          >
+            <Text class="text-3xl font-black text-white">{f().label}</Text>
+          </View>
+        )}
+      </If>
       <If when={controlsVisible() && !mediaFullscreen()}>
-        {/* Top: close, then mute / sources / fullscreen on the right —
-            the same arrangement as the system player. */}
-        <View class="absolute inset-x-0 top-0 flex-row items-center px-3 pt-3">
-          <View
-            role="button"
-            onPress={exitPlayer}
-            class={`${circle} h-11 w-11`}
-            style={glass}
-          >
-            <Glyph d="back" size={20} />
-          </View>
-          <View class="flex-1" />
-          <View
-            role="button"
-            onPress={() => {
-              pokeControls();
-              toggleMute();
-            }}
-            class={`${circle} h-11 w-11`}
-            style={glass}
-          >
-            <Glyph d={muted() ? "mute" : "vol"} size={20} />
-          </View>
-          <View
-            role="button"
-            onPress={() => {
-              pokeControls();
-              showSources.set(!showSources());
-            }}
-            class={`${circle} ml-2 h-11 w-11`}
-            style={glass}
-          >
-            <Glyph d="sources" size={20} />
-          </View>
-          <View
-            role="button"
-            onPress={() => {
-              pokeControls();
-              enterFullscreen();
-            }}
-            class={`${circle} ml-2 h-11 w-11`}
-            style={glass}
-          >
-            <Glyph d="fullscreen" size={20} />
-          </View>
-        </View>
+        {/* Center transport FIRST: it is inset-0, so rendered
+            later it would sit on top of the bars and swallow
+            their touches — document order is z-order. */}
         {/* Center transport: episode skip flanks the −10/+10 pair around
             a larger play button, like the system player. */}
         <View class="absolute inset-0 items-center justify-center">
@@ -304,6 +308,52 @@ function MobileControls() {
             </If>
           </View>
         </View>
+        {/* Top: close, then mute / sources / fullscreen on the
+            right — the same arrangement as the system player. */}
+        <View class="absolute inset-x-0 top-0 flex-row items-center px-3 pt-3">
+          <View
+            role="button"
+            onPress={exitPlayer}
+            class={`${circle} h-11 w-11`}
+            style={glass}
+          >
+            <Glyph d="back" size={20} />
+          </View>
+          <View class="flex-1" />
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              toggleMute();
+            }}
+            class={`${circle} h-11 w-11`}
+            style={glass}
+          >
+            <Glyph d={muted() ? "mute" : "vol"} size={20} />
+          </View>
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              showSources.set(!showSources());
+            }}
+            class={`${circle} ml-2 h-11 w-11`}
+            style={glass}
+          >
+            <Glyph d="sources" size={20} />
+          </View>
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              enterFullscreen();
+            }}
+            class={`${circle} ml-2 h-11 w-11`}
+            style={glass}
+          >
+            <Glyph d="fullscreen" size={20} />
+          </View>
+        </View>
         {/* Bottom: playback speed + subtitles right-aligned above the
             seek bar, which shows elapsed and remaining time. */}
         <View class="absolute inset-x-0 bottom-0 flex-col gap-2 bg-black/50 px-4 pb-6 pt-12">
@@ -327,7 +377,15 @@ function MobileControls() {
               class={`${circle} h-10 w-10`}
               style={glass}
             >
-              <Text class="text-[11px] font-bold text-white">CC</Text>
+              <Text
+                class={
+                  subsOn()
+                    ? "text-[11px] font-black text-white"
+                    : "text-[11px] font-medium text-zinc-300"
+                }
+              >
+                CC
+              </Text>
             </View>
           </View>
           <View class="flex-row items-center gap-2">

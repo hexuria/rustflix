@@ -142,15 +142,16 @@ function MobileControls() {
   };
   const remaining = computed(() => Math.max(0, dur() - position()));
   return (
-    <View class="absolute inset-0">
-      {/* Tap layer: owns every touch so the chrome can auto-hide; the
-          embed's own controls stay unreachable underneath it. The near-
-          transparent background keeps it a real hit target. */}
-      <View
-        class="absolute inset-0"
-        style={{ backgroundColor: "rgba(0,0,0,0.01)" }}
-        onPress={tapControls}
-      />
+    // The toggle lives on the container itself: a full-screen pressable
+    // SIBLING underneath the buttons can claim every touch in its bounds
+    // (only the innermost pressable responds), which left every button
+    // dead. As the parent, empty areas toggle the chrome while the
+    // buttons — its descendants — win as the innermost pressables.
+    <View
+      class="absolute inset-0"
+      style={{ backgroundColor: "rgba(0,0,0,0.01)" }}
+      onPress={tapControls}
+    >
       <If when={controlsVisible() && !mediaFullscreen()}>
         {/* Top: close, then mute / sources / fullscreen on the right —
             the same arrangement as the system player. */}
@@ -227,7 +228,8 @@ function MobileControls() {
               class={`${circle} h-12 w-12`}
               style={glass}
             >
-              <Text class="text-sm font-bold text-white">−10</Text>
+              <Text class="text-sm font-bold text-white">↺</Text>
+              <Text class="text-[9px] font-bold leading-none text-white">10</Text>
             </View>
             <View
               role="button"
@@ -251,7 +253,8 @@ function MobileControls() {
               class={`${circle} h-12 w-12`}
               style={glass}
             >
-              <Text class="text-sm font-bold text-white">+10</Text>
+              <Text class="text-sm font-bold text-white">↻</Text>
+              <Text class="text-[9px] font-bold leading-none text-white">10</Text>
             </View>
             <If when={canNext()}>
               <View

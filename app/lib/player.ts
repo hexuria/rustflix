@@ -1,15 +1,22 @@
 // Player controller: everything the player screen, the title bar and the
-// keybinds share — the WebView ref and its evaluate() probes, playback
+// keybinds share — the WebView ref and its message bridge, playback
 // commands, episode lists, the command palette's state, progress saving
 // and resume-on-open.
 //
 // The WebView is a native view above all GPUI content, so nothing drawn
-// over it is visible: every player UI element lives in-flow around it.
+// over it is visible: every player UI element lives in-flow around it,
+// and the palette replaces the video area while open.
+//
+// Page communication goes through NSH's WebView bridge: the app calls
+// `ref.postMessage(json)` which dispatches a `message` event in the
+// page, and the injected bridge script answers state reports through
+// `window.nsh.postMessage`, which arrives as the WebView's `onMessage`.
+// There is no evaluate()-with-return on this platform.
 
-import { signal } from "nsh";
+import { computed, signal } from "nsh";
 import type { WebViewRef } from "nsh";
 import { aniDetails } from "./anilist";
-import { navigate, route, type Route } from "./router";
+import { navigate, route, setLeaveHook, type Route } from "./router";
 import { getSourceUrl, type MediaType } from "./sources";
 import { itemKey, progress, saveProgress, settings } from "./store";
 import { seasonDetails, tvDetails, type Episode } from "./tmdb";
@@ -21,6 +28,7 @@ export const sourceId = signal(settings().defaultSource);
 export const showSources = signal(false);
 export const showPalette = signal(false);
 export const paletteView = signal<"root" | "speed" | "subs">("root");
+export const paletteQuery = signal("");
 export const episodes = signal<{ n: number; name: string }[]>([]);
 export const seasons = signal<number[]>([]);
 export const subTracks = signal<{ i: number; label: string; mode: string }[]>([]);
@@ -29,52 +37,116 @@ export const duration = signal(0);
 export const mediaPaused = signal(false);
 export const mediaRate = signal(1);
 
-const POLL_MS = 10_000;
-let progressTimer: ReturnType<typeof setInterval> | undefined;
-let resumeTimer: ReturnType<typeof setInterval> | undefined;
-let lastSaved = 0;
-let loadedKey = "";
+// --- Page bridge ------------------------------------------------------------
+//
+// Injected into every page the WebView loads (after content). It:
+//  - listens for `message` events carrying JSON commands
+//    ({t:'play'|'pause'|'toggle'|'seekby'|'seek'|'rate'|'track'})
+//  - polls the top document's <video> every 1.5s and reports
+//    {t,d,p,r,tracks} through window.nsh.postMessage
+//  - applies a pending absolute seek as soon as a video element exists
+//  - snaps unexpected playback rates back to 1x (embed players sometimes
+//    leave video at 2x after a space-bar toggle)
+
+export const PLAYER_BRIDGE = `(function () {
+  if (window.__rf_bridge) return;
+  window.__rf_bridge = true;
+  var okRates = { 0.5: 1, 0.75: 1, 1: 1, 1.25: 1, 1.5: 1, 2: 1 };
+  var pendingSeek = null;
+  var fixRate = function (v) {
+    if (v && v.playbackRate && !okRates[v.playbackRate]) {
+      try { v.playbackRate = 1; } catch (e) {}
+    }
+  };
+  document.addEventListener('play', function (e) { fixRate(e.target); }, true);
+  document.addEventListener('ratechange', function (e) { fixRate(e.target); }, true);
+  window.addEventListener('message', function (e) {
+    var m;
+    try { m = JSON.parse(e.data); } catch (err) { return; }
+    if (!m) return;
+    var v = document.querySelector('video');
+    if (m.t === 'seek' && typeof m.p === 'number') { pendingSeek = m.p; return; }
+    if (!v) return;
+    try {
+      if (m.t === 'play') v.play();
+      else if (m.t === 'pause') v.pause();
+      else if (m.t === 'toggle') { v.paused ? v.play() : v.pause(); }
+      else if (m.t === 'seekby') v.currentTime = Math.max(0, (v.currentTime || 0) + m.s);
+      else if (m.t === 'rate' && m.r) v.playbackRate = m.r;
+      else if (m.t === 'track' && v.textTracks) {
+        var ts = v.textTracks;
+        for (var k = 0; k < ts.length; k++) {
+          ts[k].mode = (k === m.i) ? 'showing' : (ts[k].mode === 'showing' ? 'hidden' : 'disabled');
+        }
+      }
+    } catch (err) {}
+  });
+  setInterval(function () {
+    var v;
+    try { v = document.querySelector('video'); } catch (e) { return; }
+    if (!v) return;
+    if (pendingSeek != null) {
+      try { v.currentTime = pendingSeek; pendingSeek = null; } catch (e) {}
+    }
+    var tracks = [];
+    try {
+      var ts = v.textTracks;
+      if (ts) for (var k = 0; k < ts.length; k++) {
+        var tr = ts[k];
+        tracks.push({ i: k, label: tr.label || tr.language || ('Track ' + (k + 1)), mode: tr.mode });
+      }
+    } catch (e) {}
+    try {
+      window.nsh && window.nsh.postMessage(JSON.stringify({
+        t: v.currentTime || 0, d: v.duration || 0,
+        p: !!v.paused, r: v.playbackRate || 1, tracks: tracks,
+      }));
+    } catch (e) {}
+  }, 1500);
+})();`;
+
+/** App → page: JSON command for the bridge's message listener. */
+function send(msg: Record<string, unknown>) {
+  const ref = webview();
+  if (!ref || typeof ref.postMessage !== "function") return;
+  try {
+    ref.postMessage(JSON.stringify(msg));
+  } catch {}
+}
+
+/** Page → app: the bridge's 1.5s state report. */
+export function onPlayerMessage(e: { data: unknown }) {
+  const raw = typeof e.data === "string" ? e.data : JSON.stringify(e.data);
+  if (!raw) return;
+  try {
+    const v = JSON.parse(raw);
+    if (!v || typeof v.t !== "number") return;
+    position.set(v.t);
+    if (typeof v.d === "number" && v.d > 0) duration.set(v.d);
+    mediaPaused.set(!!v.p);
+    if (typeof v.r === "number" && v.r > 0) mediaRate.set(v.r);
+    if (Array.isArray(v.tracks)) {
+      subTracks.set(
+        v.tracks.map((t: { i: number; label: string; mode: string }) => ({
+          i: t.i,
+          label: t.label,
+          mode: t.mode,
+        })),
+      );
+    }
+    const now = Date.now();
+    if (now - lastSaved > 30_000 && duration() > 0) {
+      lastSaved = now;
+      persist();
+    }
+  } catch {}
+}
+
+// --- Route helpers ------------------------------------------------------------
 
 export function playerRoute(): PlayerRoute | null {
   const r = route();
   return r.name === "player" ? r : null;
-}
-
-/** Runs JS in the top document of the player page and returns its value.
- * Videos inside cross-origin iframes cannot be reached — best effort. */
-function evalJs(js: string): Promise<unknown> {
-  const ref = webview();
-  if (!ref || typeof ref.evaluate !== "function") return Promise.resolve(null);
-  return Promise.resolve(ref.evaluate(js)).catch(() => null);
-}
-
-const PROBE = `(() => {
-  try {
-    const v = document.querySelector('video');
-    if (!v) return null;
-    return JSON.stringify({ t: v.currentTime || 0, d: v.duration || 0, p: !!v.paused, r: v.playbackRate || 1 });
-  } catch (e) { return null; }
-})()`;
-
-function probe() {
-  void evalJs(PROBE).then((raw) => {
-    const s = typeof raw === "string" ? raw : JSON.stringify(raw);
-    if (!s || s === "null") return;
-    try {
-      const v = JSON.parse(s);
-      if (v && typeof v.t === "number") {
-        position.set(v.t);
-        if (typeof v.d === "number" && v.d > 0) duration.set(v.d);
-        mediaPaused.set(!!v.p);
-        if (typeof v.r === "number" && v.r > 0) mediaRate.set(v.r);
-        const now = Date.now();
-        if (now - lastSaved > 30_000 && v.d > 0) {
-          lastSaved = now;
-          persist();
-        }
-      }
-    } catch {}
-  });
 }
 
 export function persist() {
@@ -117,56 +189,33 @@ export function pickSource(id: string) {
   showSources.set(false);
 }
 
-// --- Media commands (evaluate into the page's <video>) --------------------
+// --- Media commands (messages into the page's bridge) -------------------------
 
 export function togglePlay() {
-  void evalJs(
-    `(()=>{const v=document.querySelector('video');if(v){v.paused?v.play():v.pause();}return 1})()`,
-  );
+  send({ t: "toggle" });
+}
+
+export function pausePlayback() {
+  send({ t: "pause" });
 }
 
 export function seekBy(sec: number) {
-  void evalJs(
-    `(()=>{const v=document.querySelector('video');if(v)v.currentTime=Math.max(0,(v.currentTime||0)+(${sec}));return 1})()`,
-  );
+  send({ t: "seekby", s: sec });
 }
 
 export function setRate(rate: number) {
   mediaRate.set(rate);
-  void evalJs(
-    `(()=>{const v=document.querySelector('video');if(v)v.playbackRate=${rate};return 1})()`,
-  );
-}
-
-const TRACKS = `(() => {
-  try {
-    const v = document.querySelector('video');
-    if (!v || !v.textTracks) return '[]';
-    const ts = Array.from(v.textTracks);
-    return JSON.stringify(ts.map((t, i) => ({
-      i, label: t.label || t.language || ('Track ' + (i + 1)), mode: t.mode,
-    })));
-  } catch (e) { return '[]'; }
-})()`;
-
-export async function loadTracks() {
-  const raw = await evalJs(TRACKS);
-  const s = typeof raw === "string" ? raw : JSON.stringify(raw);
-  try {
-    subTracks.set(JSON.parse(s ?? "[]"));
-  } catch {
-    subTracks.set([]);
-  }
+  send({ t: "rate", r: rate });
 }
 
 /** `i` -1 turns subtitles off, else shows track `i` and hides the rest. */
 export function setTrack(i: number) {
-  void evalJs(
-    `(()=>{const v=document.querySelector('video');if(!v||!v.textTracks)return 1;const ts=v.textTracks;for(let k=0;k<ts.length;k++){ts[k].mode=(k===${i})?'showing':(ts[k].mode==='showing'?'hidden':'disabled');}return 1})()`,
-  );
+  send({ t: "track", i });
 }
 
-// --- Episodes ---------------------------------------------------------------
+// --- Episodes -----------------------------------------------------------------
+
+let loadedKey = "";
 
 /** Loads the episode list for the player's title/season (TV seasons and
  * episodes from TMDB, anime count from AniList). */
@@ -267,12 +316,200 @@ export async function prevEpisode() {
   } catch {}
 }
 
-// --- Palette -----------------------------------------------------------------
+// --- Command palette ------------------------------------------------------------
 
 export const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
+export interface PaletteItem {
+  id: string;
+  label: string;
+  group?: string;
+  checked?: boolean;
+}
+
+export interface PaletteRow {
+  kind: "header" | "item";
+  key: string;
+  label: string;
+  id?: string;
+  checked?: boolean;
+  /** 1-based position among the visible items; badges show ⌘1–⌘9. */
+  num?: number;
+}
+
+const paletteItems = computed<PaletteItem[]>(() => {
+  const view = paletteView();
+  const r = playerRoute();
+  if (view === "speed") {
+    return [
+      { id: "nav:root", label: "‹ Playback", group: "Speed" },
+      ...SPEEDS.map((s) => ({
+        id: `speed:${s}`,
+        label: `${s}×`,
+        group: "Speed",
+        checked: mediaRate() === s,
+      })),
+    ];
+  }
+  if (view === "subs") {
+    const items: PaletteItem[] = [
+      { id: "nav:root", label: "‹ Playback", group: "Subtitles" },
+      {
+        id: "sub:off",
+        label: "Off",
+        group: "Subtitles",
+        checked: subTracks().every((t) => t.mode !== "showing"),
+      },
+    ];
+    for (const t of subTracks()) {
+      items.push({
+        id: `sub:${t.i}`,
+        label: t.label,
+        group: "Subtitles",
+        checked: t.mode === "showing",
+      });
+    }
+    return items;
+  }
+  const items: PaletteItem[] = [];
+  const eps = episodes();
+  if (r && r.type !== "movie" && eps.length > 1) {
+    for (const e of eps) {
+      const tag = r.type === "tv" ? `S${r.season ?? 1}E${e.n}` : `Episode ${e.n}`;
+      items.push({
+        id: `ep:${e.n}`,
+        label: `${tag}${e.name ? ` — ${e.name}` : ""}`,
+        group: "Episodes",
+        checked: e.n === (r.episode ?? 1),
+      });
+    }
+  }
+  items.push(
+    {
+      id: "ctl:toggle",
+      label: mediaPaused() ? "Play" : "Pause",
+      group: "Playback",
+    },
+    { id: "ctl:back10", label: "Back 10 seconds", group: "Playback" },
+    { id: "ctl:fwd10", label: "Forward 10 seconds", group: "Playback" },
+    {
+      id: "ctl:speed",
+      label: `Playback speed · ${mediaRate()}×`,
+      group: "Playback",
+    },
+    { id: "ctl:subs", label: "Subtitles", group: "Playback" },
+    { id: "ctl:source", label: "Choose source…", group: "Playback" },
+  );
+  return items;
+});
+
+const visibleItems = computed<PaletteItem[]>(() => {
+  const q = paletteQuery().trim().toLowerCase();
+  const items = paletteItems();
+  if (!q) return items;
+  return items.filter((it) => it.label.toLowerCase().includes(q));
+});
+
+/** Items flattened into render rows: group headers where the group
+ * changes (only when more than one group is present) and 1-based numbers
+ * for the ⌘1–⌘9 badges. */
+export const paletteRows = computed<PaletteRow[]>(() => {
+  const items = visibleItems();
+  const groups = new Set(items.map((i) => i.group ?? ""));
+  const showHeaders = groups.size > 1;
+  const rows: PaletteRow[] = [];
+  let lastGroup: string | null = null;
+  let num = 0;
+  for (const it of items) {
+    const g = it.group ?? "";
+    if (showHeaders && g !== lastGroup) {
+      rows.push({ kind: "header", key: `h:${g}`, label: g || "Commands" });
+      lastGroup = g;
+    }
+    num++;
+    rows.push({
+      kind: "item",
+      key: `i:${it.id}`,
+      label: it.label,
+      id: it.id,
+      checked: it.checked,
+      num,
+    });
+  }
+  return rows;
+});
+
+export function paletteViewTitle(): string {
+  const v = paletteView();
+  if (v === "speed") return "Playback speed";
+  if (v === "subs") return "Subtitles";
+  return "Commands";
+}
+
+export function paletteSelect(id: string) {
+  if (id === "nav:root") {
+    paletteView.set("root");
+    paletteQuery.set("");
+    return;
+  }
+  if (id.startsWith("ep:")) {
+    goEpisode(Number(id.slice(3)));
+    closePalette();
+    return;
+  }
+  if (id.startsWith("speed:")) {
+    setRate(Number(id.slice(6)));
+    paletteView.set("root");
+    paletteQuery.set("");
+    return;
+  }
+  if (id === "sub:off") {
+    setTrack(-1);
+    paletteView.set("root");
+    paletteQuery.set("");
+    return;
+  }
+  if (id.startsWith("sub:")) {
+    setTrack(Number(id.slice(4)));
+    paletteView.set("root");
+    paletteQuery.set("");
+    return;
+  }
+  switch (id) {
+    case "ctl:toggle":
+      togglePlay();
+      break;
+    case "ctl:back10":
+      seekBy(-10);
+      break;
+    case "ctl:fwd10":
+      seekBy(10);
+      break;
+    case "ctl:speed":
+      paletteView.set("speed");
+      paletteQuery.set("");
+      break;
+    case "ctl:subs":
+      paletteView.set("subs");
+      paletteQuery.set("");
+      break;
+    case "ctl:source":
+      closePalette();
+      showSources.set(true);
+      break;
+  }
+}
+
+/** ⌘1–⌘9: activate the nth visible item. */
+export function choosePaletteIndex(i: number) {
+  const items = visibleItems();
+  const it = items[i];
+  if (it) paletteSelect(it.id);
+}
+
 export function openPalette() {
   paletteView.set("root");
+  paletteQuery.set("");
   showSources.set(false);
   showPalette.set(true);
 }
@@ -280,6 +517,7 @@ export function openPalette() {
 export function closePalette() {
   showPalette.set(false);
   paletteView.set("root");
+  paletteQuery.set("");
 }
 
 export function togglePalette() {
@@ -287,10 +525,15 @@ export function togglePalette() {
   else openPalette();
 }
 
-// --- Session: progress probe + resume ----------------------------------------
+// --- Session: resume + leave cleanup -------------------------------------------
+
+let lastSaved = 0;
+let resumeTimer: ReturnType<typeof setInterval> | undefined;
 
 /** Arms the resume seek: finds this title/episode's saved position and
- * retries until the page's <video> exists (embeds load it late). */
+ * re-sends the seek until the page's reported position reaches it (the
+ * bridge applies it whenever the <video> appears; embed players may
+ * override currentTime once, so it retries). */
 function armResume() {
   if (resumeTimer) clearInterval(resumeTimer);
   const r = playerRoute();
@@ -298,43 +541,46 @@ function armResume() {
   const key = itemKey(r.type, r.id, r.season ?? 0, r.episode ?? 0);
   const saved = progress().find((p) => p.key === key);
   const pos =
-    saved && saved.duration > 0 && saved.position > 30 && saved.position < saved.duration * 0.95
+    saved &&
+    saved.duration > 0 &&
+    saved.position > 30 &&
+    saved.position < saved.duration * 0.95
       ? Math.floor(saved.position)
       : 0;
   if (!pos) return;
   let tries = 0;
+  send({ t: "seek", p: pos });
   resumeTimer = setInterval(() => {
     tries++;
-    if (tries > 60) {
+    if (tries > 60 || Math.abs(position() - pos) < 10) {
       if (resumeTimer) clearInterval(resumeTimer);
       return;
     }
-    void evalJs(
-      `(()=>{const v=document.querySelector('video');if(!v)return null;try{v.currentTime=${pos};}catch(e){}return JSON.stringify({ok:true})})()`,
-    ).then((raw) => {
-      const s = typeof raw === "string" ? raw : JSON.stringify(raw);
-      if (s && s.includes('"ok":true')) {
-        if (resumeTimer) clearInterval(resumeTimer);
-      }
-    });
+    send({ t: "seek", p: pos });
   }, 2500);
 }
 
-/** Called when the player route opens: resets probes and arms resume. */
+/** Called when the player route opens: resets state and arms resume. */
 export function startPlayer() {
-  stopPlayer();
+  if (resumeTimer) clearInterval(resumeTimer);
+  resumeTimer = undefined;
   position.set(0);
   duration.set(0);
   mediaPaused.set(false);
   mediaRate.set(1);
+  subTracks.set([]);
   lastSaved = 0;
-  progressTimer = setInterval(probe, POLL_MS);
   armResume();
 }
 
 export function stopPlayer() {
-  if (progressTimer) clearInterval(progressTimer);
   if (resumeTimer) clearInterval(resumeTimer);
-  progressTimer = undefined;
   resumeTimer = undefined;
 }
+
+// Leaving the player (any navigation): save the last known position and
+// pause the page so nothing keeps playing behind the scenes.
+setLeaveHook(() => {
+  persist();
+  pausePlayback();
+});

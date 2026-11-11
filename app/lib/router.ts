@@ -29,7 +29,20 @@ export const route = signal<Route>({ name: "home" });
 const history: Route[] = [{ name: "home" }];
 const pos = signal(0);
 
+// Runs once whenever navigation leaves the player (back, forward or a
+// fresh navigate): the player uses it to save progress and pause the
+// page so nothing keeps playing off-screen.
+let leaveHook: (() => void) | null = null;
+export function setLeaveHook(fn: (() => void) | null) {
+  leaveHook = fn;
+}
+
+function fireLeave(to: Route) {
+  if (route().name === "player" && to.name !== "player") leaveHook?.();
+}
+
 export function navigate(to: Route) {
+  fireLeave(to);
   history.length = pos() + 1;
   history.push(to);
   pos.set(pos() + 1);
@@ -46,14 +59,18 @@ export function canGoForward(): boolean {
 
 export function goBack() {
   if (!canGoBack()) return;
+  const to = history[pos() - 1];
+  fireLeave(to);
   pos.set(pos() - 1);
-  route.set(history[pos()]);
+  route.set(to);
 }
 
 export function goForward() {
   if (!canGoForward()) return;
+  const to = history[pos() + 1];
+  fireLeave(to);
   pos.set(pos() + 1);
-  route.set(history[pos()]);
+  route.set(to);
 }
 
 export function goTitle(type: MediaType, id: number) {

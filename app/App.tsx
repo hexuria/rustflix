@@ -6,6 +6,8 @@ import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { canGoBack, canGoForward, goBack, goForward, navigate, route } from "./lib/router";
 import {
+  choosePaletteIndex,
+  closePalette,
   nextEpisode,
   prevEpisode,
   showPalette,
@@ -91,9 +93,7 @@ function TitleBar() {
       >
         <ChromeButton label="‹" onPress={goBack} disabled={!canGoBack()} />
         <ChromeButton label="›" onPress={goForward} disabled={!canGoForward()} />
-        <Text class="flex-1 pl-2 text-sm font-extrabold text-foreground" style={{ numberOfLines: 1 }}>
-          {playingTitle()}
-        </Text>
+        <View class="flex-1" />
         <If when={r()?.name === "player"}>
           <View
             role="button"
@@ -106,6 +106,16 @@ function TitleBar() {
             <Text class="text-sm font-bold text-foreground">⇄</Text>
           </View>
         </If>
+        {/* Centered title overlay: ignores pointer so it never blocks
+            the nav buttons, the source button or window dragging. */}
+        <View class="pointer-events-none absolute inset-0 items-center justify-center">
+          <Text
+            class="text-sm font-extrabold text-foreground"
+            style={{ numberOfLines: 1, maxWidth: "55%" }}
+          >
+            {playingTitle()}
+          </Text>
+        </View>
       </View>
     </If>
   );
@@ -186,12 +196,23 @@ export function App() {
     Window.setTitle(playingTitle());
   });
 
-  // Keyboard shortcuts: mac-style back/forward everywhere, and the
-  // player's episode/palette keys while a video plays.
+  // Keyboard shortcuts: mac-style back/forward everywhere, the player's
+  // episode/palette keys while a video plays, and ⌘1–⌘9 to pick palette
+  // items. Escape dismisses the palette or the source picker.
   effect(() => {
+    const digits: Record<string, () => void> = {};
+    for (let i = 1; i <= 9; i++) {
+      digits[`mod+${i}`] = () => {
+        if (showPalette()) choosePaletteIndex(i - 1);
+      };
+    }
     keymap.bind({
       "mod+[": () => goBack(),
       "mod+]": () => goForward(),
+      escape: () => {
+        if (showPalette()) closePalette();
+        else if (showSources()) showSources.set(false);
+      },
       "mod+k": () => {
         if (route().name === "player") togglePalette();
       },
@@ -201,6 +222,7 @@ export function App() {
       "mod+p": () => {
         if (route().name === "player") void prevEpisode();
       },
+      ...digits,
     });
   });
 

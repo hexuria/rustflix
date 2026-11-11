@@ -22,6 +22,7 @@ import {
   paletteView,
   paletteViewTitle,
   pickSource,
+  armBridge,
   PLAYER_BRIDGE,
   playerRoute,
   playerUrl,
@@ -113,10 +114,13 @@ export function Player() {
                 src={u()}
                 class="flex-1"
                 userAgent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-                injectedJavaScript={PLAYER_BRIDGE}
+                injectedJavaScriptBeforeContentLoaded={PLAYER_BRIDGE}
                 onMessage={onPlayerMessage}
                 onLoadStart={(e: unknown) => debug("wv:loadStart", e)}
-                onLoad={(e: unknown) => debug("wv:load", e)}
+                onLoad={(e: unknown) => {
+                  debug("wv:load", e);
+                  armBridge();
+                }}
                 onError={(e: unknown) => debug("wv:error", e)}
               />
             )}

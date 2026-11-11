@@ -1,7 +1,7 @@
 // rustflix app shell: sidebar navigation + the routed screen.
 // The whole UI is TSX; the GPUI host only provides the window.
 
-import { computed, effect, keymap, mount, signal, Text, View } from "nsh";
+import { computed, effect, keymap, mount, signal, Storage, Text, View } from "nsh";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { canGoBack, canGoForward, goBack, goForward, navigate, route } from "./lib/router";
@@ -10,6 +10,7 @@ import {
   closePalette,
   nextEpisode,
   prevEpisode,
+  runAutotest,
   showPalette,
   showSources,
   togglePalette,
@@ -184,7 +185,18 @@ function SwitchScreen() {
 // Boot: restore the persisted key and library before any screen mounts,
 // so the first fetch already carries the key.
 const ready = signal(false);
-void Promise.all([loadKey(), loadLibrary()]).then(() => ready.set(true));
+void Promise.all([loadKey(), loadLibrary()]).then(async () => {
+  ready.set(true);
+  // Headless verification hook: `rustflix.autotest` in storage drives
+  // the player through scripted actions (removed after one run).
+  try {
+    const raw = await Storage.getItem("rustflix.autotest");
+    if (raw) {
+      await Storage.removeItem("rustflix.autotest");
+      void runAutotest(JSON.parse(raw));
+    }
+  } catch {}
+});
 
 export function App() {
   // The system title bar hides; TitleBar below draws our own (the

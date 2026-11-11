@@ -65,8 +65,13 @@ export const downloads = signal<DownloadItem[]>([]);
 //    leave video at 2x after a space-bar toggle)
 
 export const PLAYER_BRIDGE = `(function () {
+  var __rep = function (s) {
+    try { if (window.nsh && window.nsh.postMessage) { window.nsh.postMessage(s); return; } } catch (e) {}
+    try { if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(s); } catch (e) {}
+  };
   if (window.__rf_bridge) return;
   window.__rf_bridge = true;
+  try {
   // Rates the embed may use on its own; anything else is snapped back.
   // A rate the app picked through the palette ('rate' command) is also
   // allowed, so embeds can't get stuck at e.g. 2x while 2x stays
@@ -101,6 +106,42 @@ export const PLAYER_BRIDGE = `(function () {
   };
   document.addEventListener('play', function (e) { fixRate(e.target); }, true);
   document.addEventListener('ratechange', function (e) { fixRate(e.target); }, true);
+  // Stream sniffing: the resource-timing buffer is small and hls.js floods
+  // it with segment requests, evicting the playlist URL. Record media
+  // requests as they happen instead, and grow the buffer as a backup.
+  var seenStreams = {}, streamCount = 0;
+  var note = function (u) {
+    try {
+      if (typeof u !== 'string' || !u || u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
+      if (!/\\.(m3u8|mp4|mpd|ism|m4s|ts)(\\?|#|$)/i.test(u) && !/\\.ism\\//i.test(u)) return;
+      if (seenStreams[u]) return;
+      if (streamCount > 900) { seenStreams = {}; streamCount = 0; }
+      seenStreams[u] = 1; streamCount++;
+    } catch (e) {}
+  };
+  try {
+    var of = window.fetch;
+    if (of) window.fetch = function () {
+      try {
+        var a = arguments[0];
+        note(typeof a === 'string' ? a : (a && a.url) || '');
+      } catch (e) {}
+      return of.apply(this, arguments);
+    };
+    var oo = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function () {
+      try { note(arguments[1]); } catch (e) {}
+      return oo.apply(this, arguments);
+    };
+    if (performance.setResourceTimingBufferSize) {
+      try { performance.setResourceTimingBufferSize(4000); } catch (e) {}
+      if (performance.addEventListener) {
+        performance.addEventListener('resourcetimingbufferfull', function () {
+          try { performance.clearResourceTimings(); } catch (e) {}
+        });
+      }
+    }
+  } catch (e) {}
   window.addEventListener('message', function (e) {
     var m;
     try { m = JSON.parse(e.data); } catch (err) { return; }
@@ -108,7 +149,7 @@ export const PLAYER_BRIDGE = `(function () {
     if (m.t === 'seek' && typeof m.p === 'number') { pendingSeek = m.p; return; }
     if (m.t === 'keys') {
       // While an app overlay (palette / source picker) owns the keyboard,
-      // swallow every key in the page so the embed can't also act on it —
+      // swallow every key in the page so the embed can't also act on it -
       // ViewRef.blur() cannot resign the native web view's first
       // responder, so without this space toggles playback AND filters.
       if (m.on && !keyBlock) {
@@ -134,12 +175,12 @@ export const PLAYER_BRIDGE = `(function () {
       return;
     }
     if (m.t === 'streams') {
-      // On-demand: collect media URLs the page has fetched (m3u8/mp4/mpd)
-      // from resource timing plus the picked video's own src, for the
-      // downloader. blob: srcs (hls.js MSE) are skipped — the playlist
-      // requests are what carry the real URLs.
-      var seen = {}, out = [], cand = [];
+      // On-demand: playlists/progressive files first (what the downloader
+      // wants), then a few segment URLs as fallback. Sources: URLs seen
+      // at request time, the picked video's own src, and resource timing.
+      var seen = {}, good = [], segs = [], cand = [];
       try {
+        for (var sk in seenStreams) cand.push(sk);
         var sv = pickVideo();
         if (sv) cand.push(sv.currentSrc || sv.src || '');
         var es = performance.getEntriesByType('resource');
@@ -147,14 +188,18 @@ export const PLAYER_BRIDGE = `(function () {
           cand.push(es[i].name || '');
         }
       } catch (err) {}
-      for (var j = 0; j < cand.length && out.length < 16; j++) {
+      for (var j = 0; j < cand.length; j++) {
         var u = cand[j];
         if (!u || u.indexOf('blob:') === 0 || u.indexOf('data:') === 0 || seen[u]) continue;
-        if (/\.(m3u8|mp4|mpd|ism|m4s)(\?|#|$)/i.test(u) || /\.ism\//i.test(u)) {
-          seen[u] = 1; out.push(u);
+        if (!/\\.(m3u8|mp4|mpd|ism|m4s|ts)(\\?|#|$)/i.test(u) && !/\\.ism\\//i.test(u)) continue;
+        seen[u] = 1;
+        if (/\\.m4s(\\?|#|$)/i.test(u) || /\\.ts(\\?|#|$)/i.test(u)) {
+          if (segs.length < 8) segs.push(u);
+        } else if (good.length < 10) {
+          good.push(u);
         }
       }
-      report(JSON.stringify({ t: -2, streams: out }));
+      report(JSON.stringify({ t: -2, streams: good.concat(segs) }));
       return;
     }
     var v = pickVideo();
@@ -174,7 +219,7 @@ export const PLAYER_BRIDGE = `(function () {
     } catch (err) {}
   });
   var report = function (payload) {
-    try { if (window.nsh && window.nsh.postMessage) window.nsh.postMessage(payload); } catch (e) {}
+    try { if (window.nsh && window.nsh.postMessage) { window.nsh.postMessage(payload); return; } } catch (e) {}
     try { if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(payload); } catch (e) {}
   };
   setInterval(function () {
@@ -211,16 +256,52 @@ export const PLAYER_BRIDGE = `(function () {
   // Boot beacon: proves the injected script ran at all, even if the
   // interval is later throttled into silence.
   report(JSON.stringify({ t: -3, boot: 1 }));
+  } catch (err) {
+    __rep(JSON.stringify({ t: -6, err: String(err && err.stack || err) }));
+  }
 })();`;
 
 // --- Debug ring buffer (readable in storage.json while testing) -------------
 
 const DEBUG_KEY = "rustflix.debug";
+// Diagnostics are opt-in: set `rustflix.debug` to "1" in storage to record.
+let debugOn = false;
+void Storage.getItem(DEBUG_KEY)
+  .then((v) => {
+    debugOn = v === "1";
+  })
+  .catch(() => {});
+export function setDebugEnabled(on: boolean) {
+  debugOn = on;
+  void Storage.setItem(DEBUG_KEY, on ? "1" : "0").catch(() => {});
+  if (on) debugLog.length = 0;
+}
 const debugLog: { t: number; e: string; d?: unknown }[] = [];
 export function debug(event: string, data?: unknown) {
+  if (!debugOn) return;
   debugLog.push({ t: Date.now(), e: event, d: data });
   if (debugLog.length > 80) debugLog.shift();
-  void Storage.setItem(DEBUG_KEY, JSON.stringify(debugLog)).catch(() => {});
+  void Storage.setItem("rustflix.debug.log", JSON.stringify(debugLog)).catch(() => {});
+}
+
+/**
+ * Installs the page bridge via runtime script evaluation as a backup to
+ * the `injectedJavaScriptBeforeContentLoaded` prop (which runs it at
+ * document start on every navigation). The bridge guards itself with
+ * `window.__rf_bridge`, so repeats are safe.
+ */
+export function armBridge() {
+  const ref = webview();
+  if (!ref || typeof ref.injectJavaScript !== "function") {
+    debug("bridge: no ref/injectJavaScript");
+    return;
+  }
+  try {
+    ref.injectJavaScript(PLAYER_BRIDGE);
+    debug("bridge: injected");
+  } catch (e) {
+    debug("bridge: inject threw", String(e));
+  }
 }
 
 /** App → page: JSON command for the bridge's message listener. */
@@ -262,6 +343,10 @@ export function onPlayerMessage(e: { data: unknown }) {
   try {
     const v = JSON.parse(raw);
     if (!v || typeof v.t !== "number") return;
+    if (v.t === -6) {
+      debug("bridge: threw", v.err);
+      return;
+    }
     if (v.t === -3) {
       debug("bridge: boot");
       return;
@@ -972,6 +1057,59 @@ export function togglePalette() {
   else openPalette();
 }
 
+// --- Autotest ------------------------------------------------------------------
+//
+// `rustflix.autotest` in storage drives the player without a human:
+// {"type":"movie","id":550,"title":"Fight Club","source":"vidfast",
+//  "settleMs":12000,"actions":["openPalette","choose:1","closePalette",
+//  "toggle","seekby:-10","download","streams"]}
+// Used for headless verification of the bridge, palette and downloads.
+
+export interface AutotestConfig {
+  type?: "movie" | "tv" | "anime";
+  id?: number;
+  season?: number;
+  episode?: number;
+  title?: string;
+  source?: string;
+  settleMs?: number;
+  actions?: string[];
+}
+
+const autotestWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export async function runAutotest(cfg: AutotestConfig) {
+  debug("autotest: start", cfg);
+  if (cfg.source) sourceId.set(cfg.source);
+  if (cfg.type && cfg.id) {
+    navigate({
+      name: "player",
+      type: cfg.type,
+      id: cfg.id,
+      season: cfg.season,
+      episode: cfg.episode,
+      title: cfg.title,
+    });
+  }
+  await autotestWait(cfg.settleMs ?? 12000);
+  for (const a of cfg.actions ?? []) {
+    debug("autotest: action", a);
+    if (a === "openPalette") openPalette();
+    else if (a === "closePalette") closePalette();
+    else if (a === "togglePalette") togglePalette();
+    else if (a.startsWith("choose:")) choosePaletteIndex(Number(a.slice(7)));
+    else if (a === "toggle") togglePlay();
+    else if (a === "play") send({ t: "play" });
+    else if (a === "pause") pausePlayback();
+    else if (a === "download") startDownload();
+    else if (a === "streams") refreshStreams();
+    else if (a.startsWith("seekby:")) seekBy(Number(a.slice(7)));
+    else if (a.startsWith("rate:")) setRate(Number(a.slice(5)));
+    await autotestWait(1600);
+  }
+  debug("autotest: done");
+}
+
 // --- Session: resume + leave cleanup -------------------------------------------
 
 let lastSaved = 0;
@@ -1040,6 +1178,11 @@ export function startPlayer() {
   // a few times so downloads have a stream to work with.
   for (const ms of [6000, 15000, 30000]) {
     setTimeout(refreshStreams, ms);
+  }
+  // The page's own scripts may navigate/reload after `load`; re-arm the
+  // bridge a few times so every document gets it (self-guarded).
+  for (const ms of [800, 2500, 6000]) {
+    setTimeout(armBridge, ms);
   }
 }
 

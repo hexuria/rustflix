@@ -1,8 +1,9 @@
 // Settings: TMDB key, default source, subtitle language, data controls.
 
-import { signal, Text, View } from "nsh";
+import { signal, Storage, Text, View } from "nsh";
 import { Input } from "nsh/base";
 import { clearCache, hasKey, loadKey, saveKey } from "../lib/tmdb";
+import { setDebugEnabled } from "../lib/player";
 import { PLAYER_SOURCES } from "../lib/sources";
 import { libraryReady, progress, saveSettings, settings, watchlist } from "../lib/store";
 import { Button, Section } from "../lib/ui";
@@ -12,6 +13,10 @@ const dlPathDraft = signal("");
 const dlDirDraft = signal("");
 const dlPrefilled = signal(false);
 const saved = signal(false);
+const dbgOn = signal(false);
+void Storage.getItem("rustflix.debug")
+  .then((v) => dbgOn.set(v === "1"))
+  .catch(() => {});
 
 async function persistKey() {
   await saveKey(keyDraft());
@@ -145,6 +150,22 @@ export function Settings() {
                 downloadDir: dlDirDraft().trim(),
               })
             }
+          />
+        </View>
+      </Section>
+
+      <Section title="Diagnostics">
+        <Text class="text-sm text-muted-foreground">
+          Records player bridge events to storage for troubleshooting.
+        </Text>
+        <View class="pt-1">
+          <Button
+            label={dbgOn() ? "Diagnostics: on" : "Diagnostics: off"}
+            onPress={() => {
+              const next = !dbgOn();
+              dbgOn.set(next);
+              setDebugEnabled(next);
+            }}
           />
         </View>
       </Section>

@@ -13,7 +13,7 @@
 // `window.nsh.postMessage`, which arrives as the WebView's `onMessage`.
 // There is no evaluate()-with-return on this platform.
 
-import { computed, signal } from "nsh";
+import { computed, keymap, signal, Storage } from "nsh";
 import type { WebViewRef } from "nsh";
 import { aniDetails } from "./anilist";
 import { navigate, route, setLeaveHook, type Route } from "./router";
@@ -58,6 +58,20 @@ export const PLAYER_BRIDGE = `(function () {
   var stdRates = { 0.5: 1, 0.75: 1, 1: 1, 1.25: 1, 1.5: 1 };
   var allowedRate = null;
   var pendingSeek = null;
+  // The real player is usually the video with the most readyState +
+  // duration; pages can carry preview/hover videos too.
+  var pickVideo = function () {
+    var vs;
+    try { vs = document.querySelectorAll('video'); } catch (e) { return null; }
+    var best = null, score = -1;
+    for (var i = 0; i < vs.length; i++) {
+      var v = vs[i], d = 0;
+      try { d = v.duration || 0; } catch (e) {}
+      var s = (v.readyState || 0) * 100000 + d;
+      if (s > score) { score = s; best = v; }
+    }
+    return best;
+  };
   var fixRate = function (v) {
     if (!v || !v.playbackRate) return;
     var r = v.playbackRate;
@@ -70,8 +84,8 @@ export const PLAYER_BRIDGE = `(function () {
     var m;
     try { m = JSON.parse(e.data); } catch (err) { return; }
     if (!m) return;
-    var v = document.querySelector('video');
     if (m.t === 'seek' && typeof m.p === 'number') { pendingSeek = m.p; return; }
+    var v = pickVideo();
     if (!v) return;
     try {
       if (m.t === 'play') v.play();
@@ -87,10 +101,18 @@ export const PLAYER_BRIDGE = `(function () {
       }
     } catch (err) {}
   });
+  var report = function (payload) {
+    try { if (window.nsh && window.nsh.postMessage) window.nsh.postMessage(payload); } catch (e) {}
+    try { if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(payload); } catch (e) {}
+  };
   setInterval(function () {
-    var v;
-    try { v = document.querySelector('video'); } catch (e) { return; }
-    if (!v) return;
+    var v = pickVideo();
+    if (!v) {
+      var nv = 0;
+      try { nv = document.querySelectorAll('video').length; } catch (e) {}
+      report(JSON.stringify({ t: -1, n: nv }));
+      return;
+    }
     if (pendingSeek != null) {
       // Clear BEFORE assigning: if currentTime throws (video has no src
       // yet), a stale pendingSeek must not re-fire every tick forever.
@@ -106,31 +128,66 @@ export const PLAYER_BRIDGE = `(function () {
         tracks.push({ i: k, label: tr.label || tr.language || ('Track ' + (k + 1)), mode: tr.mode });
       }
     } catch (e) {}
-    try {
-      window.nsh && window.nsh.postMessage(JSON.stringify({
-        t: v.currentTime || 0, d: v.duration || 0,
-        p: !!v.paused, r: v.playbackRate || 1, tracks: tracks,
-      }));
-    } catch (e) {}
+    var t = 0, d = 0, r = 1;
+    try { t = v.currentTime || 0; } catch (e) {}
+    try { d = v.duration || 0; } catch (e) {}
+    try { r = v.playbackRate || 1; } catch (e) {}
+    report(JSON.stringify({
+      t: t, d: d, p: !!v.paused, r: r, tracks: tracks,
+    }));
   }, 1500);
 })();`;
+
+// --- Debug ring buffer (readable in storage.json while testing) -------------
+
+const DEBUG_KEY = "rustflix.debug";
+const debugLog: { t: number; e: string; d?: unknown }[] = [];
+export function debug(event: string, data?: unknown) {
+  debugLog.push({ t: Date.now(), e: event, d: data });
+  if (debugLog.length > 80) debugLog.shift();
+  void Storage.setItem(DEBUG_KEY, JSON.stringify(debugLog)).catch(() => {});
+}
 
 /** App → page: JSON command for the bridge's message listener. */
 function send(msg: Record<string, unknown>) {
   const ref = webview();
-  if (!ref || typeof ref.postMessage !== "function") return;
+  debug("send", msg);
+  if (!ref) {
+    debug("send: no webview ref");
+    return;
+  }
   try {
-    ref.postMessage(JSON.stringify(msg));
-  } catch {}
+    if (typeof ref.postMessage === "function") {
+      ref.postMessage(JSON.stringify(msg));
+      return;
+    }
+  } catch (e) {
+    debug("send: postMessage threw", String(e));
+  }
+  try {
+    if (typeof ref.injectJavaScript === "function") {
+      const data = JSON.stringify(JSON.stringify(msg));
+      ref.injectJavaScript(
+        `window.dispatchEvent(new MessageEvent('message',{data:${data}}));`,
+      );
+      debug("send: used injectJavaScript fallback");
+    } else {
+      debug("send: no postMessage/injectJavaScript on ref");
+    }
+  } catch (e) {
+    debug("send: injectJavaScript threw", String(e));
+  }
 }
 
 /** Page → app: the bridge's 1.5s state report. */
 export function onPlayerMessage(e: { data: unknown }) {
   const raw = typeof e.data === "string" ? e.data : JSON.stringify(e.data);
+  debug("msg", raw?.slice(0, 200));
   if (!raw) return;
   try {
     const v = JSON.parse(raw);
     if (!v || typeof v.t !== "number") return;
+    if (v.t < 0) return; // heartbeat: bridge alive, no video element yet
     position.set(v.t);
     if (typeof v.d === "number" && v.d > 0) duration.set(v.d);
     mediaPaused.set(!!v.p);
@@ -517,14 +574,57 @@ export function choosePaletteIndex(i: number) {
   if (it) paletteSelect(it.id);
 }
 
+// While the palette is open it owns the keyboard: printable keys are
+// captured through keymap bindings (made on open, removed on close) so
+// nothing — including the WebView or a native text field — can steal
+// them. "always" makes them fire even if some view still holds focus.
+let paletteUnbind: (() => void) | null = null;
+
+function bindPaletteKeys() {
+  unbindPaletteKeys();
+  const type = (text: string) => () => paletteQuery.set(paletteQuery() + text);
+  const map: Record<string, () => void> = {
+    backspace: () => paletteQuery.set(paletteQuery().slice(0, -1)),
+    enter: () => {
+      const first = visibleItems()[0];
+      if (first) paletteSelect(first.id);
+    },
+    escape: () => closePalette(),
+    space: type(" "),
+    minus: type("-"),
+  };
+  for (const c of "abcdefghijklmnopqrstuvwxyz") map[c] = type(c);
+  for (const c of "0123456789") map[c] = type(c);
+  try {
+    paletteUnbind = keymap.bind(map, { when: "always" });
+  } catch {
+    // A keystroke above failed to parse: retry with the safe core set.
+    const core: Record<string, () => void> = {};
+    for (const c of "abcdefghijklmnopqrstuvwxyz0123456789") core[c] = type(c);
+    core["space"] = type(" ");
+    core["backspace"] = map["backspace"];
+    core["enter"] = map["enter"];
+    core["escape"] = map["escape"];
+    paletteUnbind = keymap.bind(core, { when: "always" });
+  }
+}
+
+function unbindPaletteKeys() {
+  const unbind = paletteUnbind;
+  paletteUnbind = null;
+  unbind?.();
+}
+
 export function openPalette() {
   paletteView.set("root");
   paletteQuery.set("");
   showSources.set(false);
   showPalette.set(true);
+  bindPaletteKeys();
 }
 
 export function closePalette() {
+  unbindPaletteKeys();
   showPalette.set(false);
   paletteView.set("root");
   paletteQuery.set("");
@@ -557,12 +657,17 @@ function armResume() {
     saved.position < saved.duration * 0.95
       ? Math.floor(saved.position)
       : 0;
-  if (!pos) return;
+  if (!pos) {
+    debug("resume: no saved position", { key, saved: saved?.position, dur: saved?.duration });
+    return;
+  }
+  debug("resume: armed", { pos });
   let tries = 0;
   send({ t: "seek", p: pos });
   resumeTimer = setInterval(() => {
     tries++;
     const t = position();
+    debug("resume: tick", { tries, t, pos });
     // Done when the page reports we're at the saved spot, or clearly
     // past it. Give up quickly if the embed keeps resetting to ~0 —
     // fighting it forever makes the video unusable.
@@ -572,6 +677,7 @@ function armResume() {
       t > pos + 30 ||
       (tries >= 3 && t < 10)
     ) {
+      debug("resume: done", { tries, t, pos });
       if (resumeTimer) clearInterval(resumeTimer);
       return;
     }
@@ -589,6 +695,7 @@ export function startPlayer() {
   mediaRate.set(1);
   subTracks.set([]);
   lastSaved = 0;
+  debug("startPlayer");
   armResume();
 }
 

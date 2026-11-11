@@ -6,7 +6,6 @@
 // playback controls, filters as you type, and ⌘1–⌘9 pick items.
 
 import { computed, effect, signal, Text, View, WebView } from "nsh";
-import { Input } from "nsh/base";
 import { route } from "../lib/router";
 import {
   duration,
@@ -36,14 +35,23 @@ import { NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
 
 const error = signal("");
 
-/** The palette's filter field; focused as soon as the palette mounts so
- * keystrokes (including space) go to it instead of the WebView. */
-const paletteInput = signal<{ focus(): void } | null>(null);
+// The last player route we armed for. NSH effects re-run on signal
+// writes, and the player writes signals every probe — without this guard
+// startPlayer/armResume would re-fire constantly and the resume seek
+// would keep resetting the video (the 9:43 loop).
+let handledRoute = "";
 
 export function Player() {
-  // (Re)arm state, episode list and resume whenever the route changes.
+  // (Re)arm state, episode list and resume only when the route itself
+  // changes — not on every position/progress signal write.
   effect(() => {
     const r = route();
+    const key =
+      r.name === "player"
+        ? `p:${r.type}:${r.id}:${r.season ?? 0}:${r.episode ?? 0}`
+        : r.name;
+    if (key === handledRoute) return;
+    handledRoute = key;
     if (r.name === "player") {
       startPlayer();
       void loadEpisodes(r);
@@ -52,16 +60,13 @@ export function Player() {
     }
   });
 
-  // The WebView keeps keyboard focus otherwise — every key (space
-  // included) would keep reaching the page while the palette is open.
+  // The WebView keeps keyboard focus otherwise — keys could keep
+  // reaching the page while the palette owns them through keymap.
   effect(() => {
     if (showPalette()) {
       try {
         webview()?.blur();
       } catch {}
-      const input = paletteInput();
-      input?.focus();
-      setTimeout(() => paletteInput()?.focus(), 120);
     }
   });
 
@@ -126,20 +131,18 @@ export function Player() {
                   <View class="flex-1" />
                   <Text class="text-[11px] text-zinc-600">esc</Text>
                 </View>
+                {/* The palette owns the keyboard through keymap bindings
+                    (bound on open, removed on close) — no text field, so
+                    Escape and every printable key reach it. */}
                 <If when={paletteView() === "root"}>
-                  <View class="border-b border-zinc-800 px-3 py-2">
-                    <Input
-                      ref={(node) => paletteInput.set(node)}
-                      value={paletteQuery()}
-                      onChange={({ value }) => paletteQuery.set(value)}
-                      onSubmit={() => {
-                        const items = paletteRows().filter((x) => x.kind === "item");
-                        const first = items.find((x) => x.num === 1);
-                        if (first?.id) paletteSelect(first.id);
-                      }}
-                      placeholder="Type to filter…"
-                      class="h-10 rounded-lg border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 placeholder:text-zinc-500"
-                    />
+                  <View class="mx-3 mb-2 mt-1 flex-row items-center rounded-lg border border-zinc-800 bg-zinc-950 px-3"
+                    style={{ height: 40 }}
+                  >
+                    <If when={!paletteQuery()}>
+                      <Text class="text-sm text-zinc-500">Type to filter…</Text>
+                    </If>
+                    <Text class="flex-1 text-sm text-zinc-100">{paletteQuery()}</Text>
+                    <Text class="text-[11px] text-zinc-600">↵</Text>
                   </View>
                 </If>
                 <View class="flex-1 overflow-y-auto p-1.5">

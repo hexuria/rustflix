@@ -36,6 +36,7 @@ export const subTracks = signal<{ i: number; label: string; mode: string }[]>([]
 export const position = signal(0);
 export const duration = signal(0);
 export const mediaPaused = signal(false);
+export const mediaMuted = signal(false);
 export const mediaRate = signal(1);
 export const mediaFullscreen = signal(false);
 /** Media URLs the embed page has fetched (m3u8/mp4/…), newest first. */
@@ -279,6 +280,7 @@ export const PLAYER_BRIDGE = `(function () {
       else if (m.t === 'toggle') { v.paused ? v.play() : v.pause(); }
       else if (m.t === 'seekby') v.currentTime = Math.max(0, (v.currentTime || 0) + m.s);
       else if (m.t === 'rate' && m.r) { allowedRate = m.r; v.playbackRate = m.r; }
+      else if (m.t === 'mute') { try { v.muted = !v.muted; } catch (e) {} }
       else if (m.t === 'track' && v.textTracks) {
         var ts = v.textTracks;
         for (var k = 0; k < ts.length; k++) {
@@ -572,13 +574,14 @@ export const PLAYER_BRIDGE = `(function () {
         tracks.push({ i: k, label: tr.label || tr.language || ('Track ' + (k + 1)), mode: tr.mode });
       }
     } catch (e) {}
-    var t = 0, d = 0, r = 1, f = false;
+    var t = 0, d = 0, r = 1, f = false, mu = false;
     try { t = v.currentTime || 0; } catch (e) {}
     try { d = v.duration || 0; } catch (e) {}
     try { r = v.playbackRate || 1; } catch (e) {}
+    try { mu = !!v.muted; } catch (e) {}
     try { f = !!(v.webkitDisplayingFullscreen || (document.fullscreenElement === v)); } catch (e) {}
     report(JSON.stringify({
-      t: t, d: d, p: !!v.paused, r: r, f: f, tracks: tracks,
+      t: t, d: d, p: !!v.paused, r: r, f: f, m: mu, tracks: tracks,
       ctl: ctlOn ? (ctlEl && ctlEl.isConnected ? (ctlEl.className === 'rf-on' ? 2 : 1) : 0) : -1,
       clk: clkN,
     }));
@@ -708,6 +711,7 @@ export function onPlayerMessage(e: { data: unknown }) {
     position.set(v.t);
     if (typeof v.d === "number" && v.d > 0) duration.set(v.d);
     mediaPaused.set(!!v.p);
+    if (typeof v.m === "boolean") mediaMuted.set(v.m);
     mediaFullscreen.set(!!v.f);
     if (typeof v.r === "number" && v.r > 0) mediaRate.set(v.r);
     if (Array.isArray(v.tracks)) {
@@ -836,6 +840,10 @@ export function pausePlayback() {
 
 export function playPlayback() {
   send({ t: "play" });
+}
+
+export function toggleMute() {
+  send({ t: "mute" });
 }
 
 export function seekBy(sec: number) {

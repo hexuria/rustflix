@@ -17,6 +17,7 @@ import {
   extLoading,
   loadEpisodes,
   mediaFullscreen,
+  mediaMuted,
   mediaPaused,
   mediaRate,
   nextEpisode,
@@ -47,6 +48,7 @@ import {
   sourceId,
   startPlayer,
   stopPlayer,
+  toggleMute,
   togglePlay,
   webview,
 } from "../lib/player";
@@ -125,10 +127,20 @@ function MobileControls() {
     return ss.indexOf(p.season ?? 1) > 0;
   });
   // Native Liquid Glass on iOS 26+ (glassEffect); backdrop-blur is the
-  // fallback the style draws on older systems.
-  const ctlBtn =
-    "flex-row items-center justify-center rounded-full bg-white/10 px-4 py-3 backdrop-blur-md active:bg-white/25";
+  // fallback the style draws on older systems. Circular buttons like
+  // AVPlayerViewController's system controls.
   const glass = { glassEffect: "regular" } as never;
+  const circle =
+    "items-center justify-center rounded-full bg-white/15 backdrop-blur-md active:bg-white/30";
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  const rate = computed(() => mediaRate());
+  const muted = computed(() => mediaMuted());
+  const cycleRate = () => {
+    const cur = rate();
+    const i = RATES.findIndex((x) => Math.abs(x - cur) < 0.01);
+    setRate(RATES[(i + 1) % RATES.length]);
+  };
+  const remaining = computed(() => Math.max(0, dur() - position()));
   return (
     <View class="absolute inset-0">
       {/* Tap layer: owns every touch so the chrome can auto-hide; the
@@ -140,162 +152,177 @@ function MobileControls() {
         onPress={tapControls}
       />
       <If when={controlsVisible() && !mediaFullscreen()}>
-        <>
-          <View class="absolute inset-x-0 top-0 flex-row items-center gap-2 bg-black/60 px-3 pb-8 pt-3">
+        {/* Top: close, then mute / sources / fullscreen on the right —
+            the same arrangement as the system player. */}
+        <View class="absolute inset-x-0 top-0 flex-row items-center px-3 pt-3">
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              goBack();
+            }}
+            class={`${circle} h-10 w-10`}
+            style={glass}
+          >
+            <Text class="text-lg font-bold text-white">‹</Text>
+          </View>
+          <View class="flex-1" />
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              toggleMute();
+            }}
+            class={`${circle} h-10 w-10`}
+            style={glass}
+          >
+            <Text class="text-base text-white">{muted() ? "🔇" : "🔊"}</Text>
+          </View>
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              showSources.set(!showSources());
+            }}
+            class={`${circle} ml-2 h-10 w-10`}
+            style={glass}
+          >
+            <Text class="text-base font-bold text-white">⇄</Text>
+          </View>
+          <View
+            role="button"
+            onPress={() => {
+              pokeControls();
+              enterFullscreen();
+            }}
+            class={`${circle} ml-2 h-10 w-10`}
+            style={glass}
+          >
+            <Text class="text-base font-bold text-white">⛶</Text>
+          </View>
+        </View>
+        {/* Center transport: episode skip flanks the −10/+10 pair around
+            a larger play button, like the system player. */}
+        <View class="absolute inset-0 items-center justify-center">
+          <View class="flex-row items-center gap-5">
+            <If when={canPrev()}>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  void prevEpisode();
+                }}
+                class={`${circle} h-11 w-11`}
+                style={glass}
+              >
+                <Text class="text-lg text-white">⏮</Text>
+              </View>
+            </If>
             <View
               role="button"
               onPress={() => {
                 pokeControls();
-                goBack();
+                seekBy(-10);
               }}
-              class={ctlBtn}
+              class={`${circle} h-12 w-12`}
               style={glass}
             >
-              <Text class="text-xl font-bold text-white">‹</Text>
+              <Text class="text-sm font-bold text-white">−10</Text>
             </View>
-            <Text
-              class="flex-1 text-base font-semibold text-white"
-              style={{ numberOfLines: 1 }}
+            <View
+              role="button"
+              onPress={() => {
+                pokeControls();
+                togglePlay();
+              }}
+              class={`${circle} h-16 w-16`}
+              style={glass}
             >
-              {r()?.title ?? ""}
+              <Text class="text-2xl font-bold text-white">
+                {paused() ? "▶" : "⏸"}
+              </Text>
+            </View>
+            <View
+              role="button"
+              onPress={() => {
+                pokeControls();
+                seekBy(10);
+              }}
+              class={`${circle} h-12 w-12`}
+              style={glass}
+            >
+              <Text class="text-sm font-bold text-white">+10</Text>
+            </View>
+            <If when={canNext()}>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  void nextEpisode();
+                }}
+                class={`${circle} h-11 w-11`}
+                style={glass}
+              >
+                <Text class="text-lg text-white">⏭</Text>
+              </View>
+            </If>
+          </View>
+        </View>
+        {/* Bottom: playback speed + subtitles right-aligned above the
+            seek bar, which shows elapsed and remaining time. */}
+        <View class="absolute inset-x-0 bottom-0 flex-col gap-2 bg-black/50 px-4 pb-5 pt-10">
+          <View class="flex-row items-center justify-end gap-2">
+            <View
+              role="button"
+              onPress={() => {
+                pokeControls();
+                cycleRate();
+              }}
+              class={`${circle} h-9 px-3`}
+              style={glass}
+            >
+              <Text class="text-xs font-bold text-white">
+                {Math.round(rate() * 100) / 100}×
+              </Text>
+            </View>
+            <View
+              role="button"
+              onPress={() => {
+                pokeControls();
+                paletteView.set("subs");
+                openPalette();
+              }}
+              class={`${circle} h-9 w-9`}
+              style={glass}
+            >
+              <Text class="text-[11px] font-bold text-white">CC</Text>
+            </View>
+          </View>
+          <View class="flex-row items-center gap-2">
+            <Text class="w-10 text-right text-[11px] font-medium text-zinc-300">
+              {fmtTime(position())}
             </Text>
-            <View
-              role="button"
-              onPress={() => {
+            <Slider
+              value={pct()}
+              onChange={({ value }) => seekDrag.set(Number(value))}
+              onChangeEnd={({ value }) => {
+                const d = duration();
+                seekTo((Number(value) / 100) * d);
+                seekDrag.set(null);
                 pokeControls();
-                showSources.set(!showSources());
               }}
-              class={ctlBtn}
-              style={glass}
-            >
-              <Text class="text-lg font-bold text-white">⇄</Text>
-            </View>
+              accessibilityLabel="Seek"
+              class="flex-1"
+              trackClass="h-9 flex-1 justify-center px-2"
+              indicatorClass="h-1.5 rounded-full bg-white/25"
+              rangeClass="h-full rounded-full bg-red-600"
+              thumbClass="h-4 w-4 rounded-full bg-white"
+            />
+            <Text class="w-10 text-[11px] font-medium text-zinc-300">
+              -{fmtTime(remaining())}
+            </Text>
           </View>
-          <View class="absolute inset-x-0 bottom-0 flex-col gap-3 bg-black/60 px-4 pb-6 pt-12">
-            <View class="flex-row items-center gap-3">
-              <Text class="w-12 text-right text-xs font-medium text-zinc-300">
-                {fmtTime(position())}
-              </Text>
-              <Slider
-                value={pct()}
-                onChange={({ value }) => seekDrag.set(Number(value))}
-                onChangeEnd={({ value }) => {
-                  const d = duration();
-                  seekTo((Number(value) / 100) * d);
-                  seekDrag.set(null);
-                  pokeControls();
-                }}
-                accessibilityLabel="Seek"
-                class="flex-1"
-                trackClass="h-9 flex-1 justify-center px-3"
-                indicatorClass="h-2 rounded-full bg-white/25"
-                rangeClass="h-full rounded-full bg-red-600"
-                thumbClass="h-6 w-6 rounded-full bg-white"
-              />
-              <Text class="w-12 text-xs font-medium text-zinc-300">
-                {fmtTime(dur())}
-              </Text>
-            </View>
-            <View class="flex-row items-center justify-center gap-3">
-              <If when={canPrev()}>
-                <View
-                  role="button"
-                  onPress={() => {
-                    pokeControls();
-                    void prevEpisode();
-                  }}
-                  class={ctlBtn}
-                  style={glass}
-                >
-                  <Text class="text-xl text-white">⏮</Text>
-                </View>
-              </If>
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  seekBy(-10);
-                }}
-                class={ctlBtn}
-                style={glass}
-              >
-                <Text class="text-sm font-bold text-white">−10s</Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  togglePlay();
-                }}
-                class="flex-row items-center justify-center rounded-full bg-white/15 px-6 py-3.5 backdrop-blur-md active:bg-white/30"
-                style={glass}
-              >
-                <Text class="text-2xl font-bold text-white">
-                  {paused() ? "▶" : "⏸"}
-                </Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  seekBy(10);
-                }}
-                class={ctlBtn}
-                style={glass}
-              >
-                <Text class="text-sm font-bold text-white">+10s</Text>
-              </View>
-              <If when={canNext()}>
-                <View
-                  role="button"
-                  onPress={() => {
-                    pokeControls();
-                    void nextEpisode();
-                  }}
-                  class={ctlBtn}
-                  style={glass}
-                >
-                  <Text class="text-xl text-white">⏭</Text>
-                </View>
-              </If>
-            </View>
-            <View class="flex-row items-center justify-center gap-3">
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  showSources.set(!showSources());
-                }}
-                class={ctlBtn}
-                style={glass}
-              >
-                <Text class="text-base font-bold text-white">⇄ Sources</Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  enterFullscreen();
-                }}
-                class={ctlBtn}
-                style={glass}
-              >
-                <Text class="text-lg font-bold text-white">⛶</Text>
-              </View>
-              <View
-                role="button"
-                onPress={() => {
-                  pokeControls();
-                  openPalette();
-                }}
-                class={ctlBtn}
-                style={glass}
-              >
-                <Text class="text-lg font-bold text-white">⋯</Text>
-              </View>
-            </View>
-          </View>
-        </>
+        </View>
       </If>
     </View>
   );

@@ -3,7 +3,7 @@
 import { signal, Storage, Text, View } from "nsh";
 import { Input } from "nsh/base";
 import { clearCache, hasKey, loadKey, saveKey } from "../lib/tmdb";
-import { canDownload, setDebugEnabled } from "../lib/player";
+import { canDownload, defaultDownloadDir, defaultDownloaderPath, setDebugEnabled } from "../lib/player";
 import { PLAYER_SOURCES } from "../lib/sources";
 import { libraryReady, progress, saveSettings, settings, watchlist } from "../lib/store";
 import { Button, Section } from "../lib/ui";
@@ -131,17 +131,23 @@ export function Settings() {
         <Input
           value={dlPathDraft()}
           onChange={({ value }) => dlPathDraft.set(value)}
-          placeholder="/Users/you/Downloads/vid-dl/macOS_arm64-portable/vid-dl"
+          placeholder={defaultDownloaderPath()}
           class="rounded-lg border border-input bg-background px-3 py-2 text-foreground"
         />
         <Text class="pt-2 text-sm text-muted-foreground">Download folder</Text>
         <Input
           value={dlDirDraft()}
           onChange={({ value }) => dlDirDraft.set(value)}
-          placeholder="~/Downloads/rustflix"
+          placeholder={defaultDownloadDir()}
           class="rounded-lg border border-input bg-background px-3 py-2 text-foreground"
         />
-        <View class="pt-1">
+        <Text class="text-sm text-muted-foreground">
+          Defaults live under your Downloads folder (never a temp dir): videos
+          go to <Text class="text-foreground">{defaultDownloadDir()}</Text>.
+          Extract vid-dl into <Text class="text-foreground">~/Downloads/vid-dl/</Text>{" "}
+          and the suggested binary path matches.
+        </Text>
+        <View class="flex-row gap-3 pt-1">
           <Button
             primary
             label="Save Downloader"
@@ -151,6 +157,17 @@ export function Settings() {
                 downloadDir: dlDirDraft().trim(),
               })
             }
+          />
+          <Button
+            label="Use defaults"
+            onPress={() => {
+              dlPathDraft.set(defaultDownloaderPath());
+              dlDirDraft.set("");
+              saveSettings({
+                downloaderPath: defaultDownloaderPath(),
+                downloadDir: "",
+              });
+            }}
           />
         </View>
       </Section>

@@ -15,10 +15,10 @@ done
 [ -n "$OUT" ] || { echo "bundle.nshc not found" >&2; exit 1; }
 
 BIN=""
-for base in target "$HOME"/.cargo/targets/rustflix-*/release; do
+for base in target/release "$HOME"/.cargo/targets/rustflix-*/release; do
   [ -f "$base/rustflix" ] && BIN="$base/rustflix" && break
 done
-[ -n "$BIN" ] || BIN=$(find "$HOME"/.cargo/targets/rustflix-*/release -maxdepth 1 -name rustflix -type f | head -1)
+[ -n "$BIN" ] || BIN=$(find target/release "$HOME"/.cargo/targets/rustflix-*/release -maxdepth 1 -name rustflix -type f 2>/dev/null | head -1)
 [ -n "$BIN" ] || { echo "release binary not found" >&2; exit 1; }
 
 DEST="${1:-$HOME/Applications}/rustflix.app"

@@ -644,6 +644,29 @@ export function canDownload(): boolean {
   return p !== "ios" && p !== "android";
 }
 
+function homeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || "";
+}
+
+/** Default download folder per OS — persistent, never a temp dir. */
+export function defaultDownloadDir(): string {
+  const sep = process.platform === "windows" ? "\\" : "/";
+  return `${homeDir()}${sep}Downloads${sep}rustflix`;
+}
+
+/** Suggested vid-dl binary path per OS (the portable release layout:
+ *  <os>_<arch>-portable/<binary>); user still has to point at the real
+ *  extracted file, this is only a placeholder/hint. */
+export function defaultDownloaderPath(): string {
+  const sep = process.platform === "windows" ? "\\" : "/";
+  const exe = process.platform === "windows" ? "vid-dl.exe" : "vid-dl";
+  let plat = "macOS";
+  if (process.platform === "windows") plat = "Windows";
+  else if (process.platform === "linux") plat = "Linux";
+  const arch = process.arch === "arm64" || process.arch === "aarch64" ? "arm64" : "x86_64";
+  return `${homeDir()}${sep}Downloads${sep}vid-dl${sep}${plat}_${arch}-portable${sep}${exe}`;
+}
+
 function startDownloadInner() {
   const name = downloadName();
   const url = bestStreamUrl();
@@ -661,8 +684,7 @@ function startDownloadInner() {
     return;
   }
   let dir = (
-    (settings().downloadDir || "").trim() ||
-    `${process.env.HOME ?? ""}/Downloads/rustflix`
+    (settings().downloadDir || "").trim() || defaultDownloadDir()
   ).replace(/\/+$/, "");
   // `~` doesn't expand inside the single-quoted shell argument.
   if (dir === "~" || dir.startsWith("~/")) {
@@ -1282,4 +1304,8 @@ export function stopPlayer() {
 setLeaveHook(() => {
   persist();
   pausePlayback();
+  // The palette's key bindings are global while open: leaving the player
+  // with it up would swallow every keystroke in the rest of the app.
+  closePalette();
+  showSources.set(false);
 });

@@ -39,6 +39,9 @@ export const mediaPaused = signal(false);
 export const mediaRate = signal(1);
 /** Media URLs the embed page has fetched (m3u8/mp4/…), newest first. */
 export const streamUrls = signal<string[]>([]);
+/** Request headers the page used per stream URL (for the downloader). */
+export const streamHeaders = signal<Record<string, Record<string, string>>>({});
+export const streamUA = signal("");
 
 export interface DownloadItem {
   id: number;
@@ -109,29 +112,53 @@ export const PLAYER_BRIDGE = `(function () {
   // Stream sniffing: the resource-timing buffer is small and hls.js floods
   // it with segment requests, evicting the playlist URL. Record media
   // requests as they happen instead, and grow the buffer as a backup.
-  var seenStreams = {}, streamCount = 0;
+  var seenStreams = {}, streamCount = 0, streamSeq = 0;
+  var hdrs = {};
   var note = function (u) {
     try {
       if (typeof u !== 'string' || !u || u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
       if (!/\\.(m3u8|mp4|mpd|ism|m4s|ts)(\\?|#|$)/i.test(u) && !/\\.ism\\//i.test(u)) return;
-      if (seenStreams[u]) return;
-      if (streamCount > 900) { seenStreams = {}; streamCount = 0; }
-      seenStreams[u] = 1; streamCount++;
+      if (streamCount > 900) { seenStreams = {}; hdrs = {}; streamCount = 0; }
+      // Recency-ordered: signed playlist URLs expire, newest must win.
+      seenStreams[u] = ++streamSeq; streamCount++;
+    } catch (e) {}
+  };
+  var grabHeaders = function (h, u) {
+    try {
+      if (!h || typeof u !== 'string' || !u) return;
+      var o = hdrs[u] = hdrs[u] || {};
+      if (typeof Headers !== 'undefined' && h instanceof Headers) {
+        h.forEach(function (v, k) { o[k] = v; });
+      } else if (Array.isArray(h)) {
+        for (var i = 0; i < h.length; i++) o[h[i][0]] = h[i][1];
+      } else if (typeof h === 'object') {
+        for (var k2 in h) o[k2] = h[k2];
+      }
     } catch (e) {}
   };
   try {
     var of = window.fetch;
     if (of) window.fetch = function () {
       try {
-        var a = arguments[0];
-        note(typeof a === 'string' ? a : (a && a.url) || '');
+        var a = arguments[0], init = arguments[1];
+        var u = typeof a === 'string' ? a : (a && a.url) || '';
+        note(u);
+        grabHeaders(a && a.headers !== undefined ? a.headers : (init && init.headers), u);
       } catch (e) {}
       return of.apply(this, arguments);
     };
     var oo = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function () {
-      try { note(arguments[1]); } catch (e) {}
+      try { this.__rfu = arguments[1]; note(this.__rfu); } catch (e) {}
       return oo.apply(this, arguments);
+    };
+    var osr = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+      try {
+        var u = this.__rfu;
+        if (typeof u === 'string' && u) (hdrs[u] = hdrs[u] || {})[k] = v;
+      } catch (e) {}
+      return osr.apply(this, arguments);
     };
     if (performance.setResourceTimingBufferSize) {
       try { performance.setResourceTimingBufferSize(4000); } catch (e) {}
@@ -180,7 +207,10 @@ export const PLAYER_BRIDGE = `(function () {
       // at request time, the picked video's own src, and resource timing.
       var seen = {}, good = [], segs = [], cand = [];
       try {
-        for (var sk in seenStreams) cand.push(sk);
+        var skeys = [];
+        for (var sk in seenStreams) skeys.push(sk);
+        skeys.sort(function (a, b) { return seenStreams[b] - seenStreams[a]; });
+        for (var x = 0; x < skeys.length; x++) cand.push(skeys[x]);
         var sv = pickVideo();
         if (sv) cand.push(sv.currentSrc || sv.src || '');
         var es = performance.getEntriesByType('resource');
@@ -199,7 +229,11 @@ export const PLAYER_BRIDGE = `(function () {
           good.push(u);
         }
       }
-      report(JSON.stringify({ t: -2, streams: good.concat(segs) }));
+      var out = good.concat(segs), hm = {};
+      for (var y = 0; y < out.length && y < 10; y++) {
+        if (hdrs[out[y]]) hm[out[y]] = hdrs[out[y]];
+      }
+      report(JSON.stringify({ t: -2, streams: out, hdrs: hm, ua: navigator.userAgent || '' }));
       return;
     }
     var v = pickVideo();
@@ -338,7 +372,7 @@ function send(msg: Record<string, unknown>) {
 /** Page → app: the bridge's 1.5s state report. */
 export function onPlayerMessage(e: { data: unknown }) {
   const raw = typeof e.data === "string" ? e.data : JSON.stringify(e.data);
-  debug("msg", raw?.slice(0, 200));
+  debug("msg", raw?.slice(0, 2000));
   if (!raw) return;
   try {
     const v = JSON.parse(raw);
@@ -357,6 +391,10 @@ export function onPlayerMessage(e: { data: unknown }) {
           v.streams.filter((s: unknown) => typeof s === "string"),
         );
       }
+      if (v.hdrs && typeof v.hdrs === "object") {
+        streamHeaders.set(v.hdrs as Record<string, Record<string, string>>);
+      }
+      if (typeof v.ua === "string" && v.ua) streamUA.set(v.ua);
       return;
     }
     if (v.t < 0) return; // heartbeat: bridge alive, no video element yet
@@ -628,10 +666,37 @@ function startDownloadInner() {
     shq(bin), "--cli", shq(url),
     "-f", shq("mp4 (with Audio)"), "-r", "best", "-b", "320",
     "-n", shq(name), "-d", shq(dir),
-  ].join(" ");
+  ];
+  // Stream CDNs reject bare yt-dlp requests; forward the headers the page
+  // itself used (captured by the bridge), plus the embed origin as
+  // Referer when the page didn't set one explicitly.
+  const extra: string[] = [];
+  const rawHdrs = streamHeaders()[url] || {};
+  for (const k in rawHdrs) {
+    const v = String(rawHdrs[k]);
+    if (v && !/[\r\n]/.test(v)) {
+      extra.push(`--add-header "${k}: ${v.replace(/"/g, "")}"`);
+    }
+  }
+  try {
+    const page = playerUrl();
+    const origin = page ? new URL(page).origin : "";
+    const hasRef = Object.keys(rawHdrs).some((k) => k.toLowerCase() === "referer");
+    // vid-dl's header fallback rebuilds http_headers per retry domain, so
+    // --referer/--user-agent opts get overridden — --add-header survives as
+    // the "default headers" attempt that runs before domain retries.
+    if (origin && !hasRef) extra.push(`--add-header "Referer: ${origin}/"`);
+    // Stream CDNs 403 anything that doesn't look like the browser that
+    // fetched the playlist — yt-dlp's default UA gets rejected outright.
+    const ua = streamUA() ||
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+    extra.push(`--add-header "User-Agent: ${ua.replace(/"/g, "")}"`);
+  } catch {}
+  if (extra.length) inner.push("-a", shq(extra.join(" ")));
+  const innerCmd = inner.join(" ");
   const isWin = process.platform === "windows";
   const command = isWin ? "cmd.exe" : "/bin/sh";
-  const args = isWin ? ["/c", inner] : ["-c", inner];
+  const args = isWin ? ["/c", innerCmd] : ["-c", innerCmd];
 
   let proc: ReturnType<typeof process.spawn>;
   try {

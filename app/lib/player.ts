@@ -208,6 +208,9 @@ export const PLAYER_BRIDGE = `(function () {
       t: t, d: d, p: !!v.paused, r: r, tracks: tracks,
     }));
   }, 1500);
+  // Boot beacon: proves the injected script ran at all, even if the
+  // interval is later throttled into silence.
+  report(JSON.stringify({ t: -3, boot: 1 }));
 })();`;
 
 // --- Debug ring buffer (readable in storage.json while testing) -------------
@@ -259,6 +262,10 @@ export function onPlayerMessage(e: { data: unknown }) {
   try {
     const v = JSON.parse(raw);
     if (!v || typeof v.t !== "number") return;
+    if (v.t === -3) {
+      debug("bridge: boot");
+      return;
+    }
     if (v.t === -2) {
       if (Array.isArray(v.streams)) {
         streamUrls.set(
@@ -1025,7 +1032,7 @@ export function startPlayer() {
   mediaRate.set(1);
   subTracks.set([]);
   lastSaved = 0;
-  debug("startPlayer");
+  debug("startPlayer", { src: sourceId(), url: playerUrl()?.slice(0, 140) });
   armResume();
   const r = playerRoute();
   if (r) void ensureExtId(r);

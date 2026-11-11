@@ -9,6 +9,7 @@ import { computed, effect, Text, View, WebView } from "nsh";
 import { route } from "../lib/router";
 import {
   cancelDownload,
+  debug,
   downloads,
   episodes,
   extLoading,
@@ -114,6 +115,9 @@ export function Player() {
                 userAgent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
                 injectedJavaScript={PLAYER_BRIDGE}
                 onMessage={onPlayerMessage}
+                onLoadStart={(e: unknown) => debug("wv:loadStart", e)}
+                onLoad={(e: unknown) => debug("wv:load", e)}
+                onError={(e: unknown) => debug("wv:error", e)}
               />
             )}
           </If>

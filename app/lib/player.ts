@@ -627,11 +627,21 @@ function parseDownloadLine(d: DownloadItem, line: string): Partial<DownloadItem>
 
 /** Spawns the configured vid-dl binary against the current stream URL. */
 export function startDownload() {
+  if (!canDownload()) {
+    failDownload(downloadName(), "Downloads aren't available on this platform.");
+    return;
+  }
   try {
     startDownloadInner();
   } catch (e) {
     failDownload(downloadName(), `Download failed: ${String(e).slice(0, 140)}`);
   }
+}
+
+/** Subprocess downloads need a desktop OS (iOS/Android can't spawn). */
+export function canDownload(): boolean {
+  const p = process.platform;
+  return p !== "ios" && p !== "android";
 }
 
 function startDownloadInner() {
@@ -925,11 +935,13 @@ const paletteItems = computed<PaletteItem[]>(() => {
       group: "Playback",
     },
     { id: "ctl:subs", label: "Subtitles", group: "Playback" },
-    {
-      id: "ctl:download",
-      label: downloadLabel(),
-      group: "Playback",
-    },
+    ...(canDownload()
+      ? [{
+          id: "ctl:download",
+          label: downloadLabel(),
+          group: "Playback",
+        }]
+      : []),
     { id: "ctl:source", label: "Choose source…", group: "Playback" },
   );
   return items;

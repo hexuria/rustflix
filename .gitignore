@@ -2,3 +2,7 @@
 Cargo.lock.bak
 *.nshc
 .DS_Store
+
+# iOS: generated NSH bundle + Xcode project (regenerate via xcodegen/sync-bundle.sh)
+ios/Rustflix/nsh/
+ios/rustflix.xcodeproj/

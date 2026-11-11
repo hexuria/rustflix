@@ -200,13 +200,14 @@ void Promise.all([loadKey(), loadLibrary()]).then(async () => {
 
 export function App() {
   // The system title bar hides; TitleBar below draws our own (the
-  // traffic lights stay, in the area `titleBar()` reports).
-  Window.setTitleBar({ style: "hidden", height: 40 });
-
-  // The native window title follows the route (movie name while playing).
-  effect(() => {
-    Window.setTitle(playingTitle());
-  });
+  // traffic lights stay, in the area `titleBar()` reports). Desktop only.
+  if (hasWindow) {
+    Window.setTitleBar({ style: "hidden", height: 40 });
+    // The native window title follows the route (movie name while playing).
+    effect(() => {
+      Window.setTitle(playingTitle());
+    });
+  }
 
   // Keyboard shortcuts: mac-style back/forward everywhere, the player's
   // episode/palette keys while a video plays, and ⌘1–⌘9 to pick palette

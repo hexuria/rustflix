@@ -10,14 +10,27 @@ use std::path::{Path, PathBuf};
 
 use nsh_platform_gpui::{AppOptions, AppSource, AssetBase, Bundle, run_app};
 
-/// The bundle to run: the argument (a `.nshc` or its directory), else
+/// The bundle to run: an explicit argument (a `.nshc` or its directory),
+/// else `Contents/Resources/nsh` when running inside `rustflix.app`, else
 /// `app/` as `build.rs` built it.
 fn bundle_path() -> PathBuf {
-    let arg = std::env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .next();
-    let path = arg.unwrap_or_else(|| Path::new(env!("OUT_DIR")).join("app"));
+    if let Some(arg) = std::env::args_os().skip(1).map(PathBuf::from).next() {
+        return if arg.is_dir() { arg.join("bundle.nshc") } else { arg };
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // <App>.app/Contents/MacOS/rustflix -> <App>.app/Contents/Resources/nsh
+        if let Some(resources) = exe
+            .parent()
+            .and_then(|macos| macos.parent())
+            .map(|contents| contents.join("Resources").join("nsh"))
+        {
+            let bundled = resources.join("bundle.nshc");
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+    }
+    let path = Path::new(env!("OUT_DIR")).join("app");
     if path.is_dir() {
         path.join("bundle.nshc")
     } else {

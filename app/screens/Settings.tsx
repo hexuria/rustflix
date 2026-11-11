@@ -3,7 +3,7 @@
 import { signal, Storage, Text, View } from "nsh";
 import { Input } from "nsh/base";
 import { clearCache, hasKey, loadKey, saveKey } from "../lib/tmdb";
-import { setDebugEnabled } from "../lib/player";
+import { canDownload, setDebugEnabled } from "../lib/player";
 import { PLAYER_SOURCES } from "../lib/sources";
 import { libraryReady, progress, saveSettings, settings, watchlist } from "../lib/store";
 import { Button, Section } from "../lib/ui";
@@ -119,6 +119,7 @@ export function Settings() {
         </View>
       </Section>
 
+      <If when={canDownload()}>
       <Section title="Video Downloader">
         <Text class="text-sm text-muted-foreground">
           Download the latest release from vid-dl-cli-only (macOS_arm64-portable
@@ -153,6 +154,7 @@ export function Settings() {
           />
         </View>
       </Section>
+      </If>
 
       <Section title="Diagnostics">
         <Text class="text-sm text-muted-foreground">

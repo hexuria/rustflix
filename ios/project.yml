@@ -1,0 +1,33 @@
+name: rustflix
+options:
+  bundleIdPrefix: com.hexuria
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  rustflix:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Rustflix
+        excludes:
+          - "nsh"
+      - path: Rustflix/nsh
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: ../../_research/nsh/dist/nsh/embed/ios/NativeShell.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hexuria.rustflix
+        PRODUCT_NAME: rustflix
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: rustflix
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""

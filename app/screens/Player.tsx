@@ -28,6 +28,7 @@ import {
   pickSource,
   playPlayback,
   enterFullscreen,
+  setPageControls,
   position,
   duration,
   armBridge,
@@ -303,6 +304,16 @@ export function Player() {
   const r = computed(() => playerRoute());
   const overlay = computed(() => showPalette() || showSources());
 
+  // Desktop: the web view is a native child above all GPUI content, so
+  // the control bar lives in the page's own DOM. It must be re-sent after
+  // every page load (each document gets a fresh bridge) and when the
+  // title changes (the top bar shows it).
+  effect(() => {
+    if (!platform.desktop) return;
+    const u = src();
+    if (u) setPageControls(true, r()?.title ?? "");
+  });
+
   // iOS blocks the embed's autoplay; a programmatic play() once the page
   // has settled works (verified against WKWebView), so retry it once —
   // the user already pressed Play on the title page. On desktop the same
@@ -381,6 +392,9 @@ export function Player() {
                 onLoad={(e: unknown) => {
                   debug("wv:load", e);
                   armBridge();
+                  // Fresh document = fresh bridge state: re-enable the
+                  // in-page control bar (desktop only).
+                  if (platform.desktop) setPageControls(true, r()?.title ?? "");
                 }}
                 onError={(e: unknown) => debug("wv:error", e)}
               />

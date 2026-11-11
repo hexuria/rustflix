@@ -2,7 +2,7 @@
 // source switching, episode skipping and progress saving.
 
 import { signal, Text, View, WebView, type WebViewRef } from "nsh";
-import { navigate, route } from "../lib/router";
+import { canGoBack, goBack, navigate, route } from "../lib/router";
 import { getSourceUrl, NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
 import { itemKey, saveProgress, settings } from "../lib/store";
 import type { Route } from "../lib/router";
@@ -28,6 +28,20 @@ const PROBE = `(() => {
     if (!v) return null;
     return JSON.stringify({ t: v.currentTime || 0, d: v.duration || 0 });
   } catch (e) { return null; }
+})()`;
+
+/** Embed players sometimes leave a video at an unusual playback rate
+ * (seen: 2x after a space-bar toggle). Snap anything off the common
+ * rates back to 1x. */
+const RATE_GUARD = `(() => {
+  const ok = new Set([0.5, 0.75, 1, 1.25, 1.5]);
+  const fix = (v) => {
+    if (v && v.playbackRate && !ok.has(v.playbackRate)) {
+      try { v.playbackRate = 1; } catch (e) {}
+    }
+  };
+  document.addEventListener('play', (e) => fix(e.target), true);
+  document.addEventListener('ratechange', (e) => fix(e.target), true);
 })()`;
 
 function currentRoute(): PlayerRoute | null {
@@ -111,6 +125,12 @@ function next() {
 
 function back() {
   persist();
+  // Browser-like: return to wherever the player was opened from when the
+  // history has it, else the title page.
+  if (canGoBack()) {
+    goBack();
+    return;
+  }
   const r = currentRoute();
   navigate({ name: "title", type: r?.type ?? "movie", id: r?.id ?? 0 });
 }
@@ -133,38 +153,11 @@ export function Player() {
 
   return (
     <View class="flex-1 bg-black">
-      <If when={src}>
-        {(u) => (
-          <WebView
-            ref={(node) => webview.set(node)}
-            src={u()}
-            class="flex-1"
-            userAgent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-            onError={(e) => error.set(String(e))}
-          />
-        )}
-      </If>
-      <If when={!src}>
-        <View class="flex-1 items-center justify-center">
-          <Text class="text-zinc-400">This source cannot play this title.</Text>
-        </View>
-      </If>
-
-      {/* Top bar */}
-      <View
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          right: 0,
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 12,
-          padding: 12,
-          backgroundColor: "rgba(0,0,0,0.75)",
-        }}
-      >
-        <View role="button" onPress={back} class="rounded-lg bg-black/50 px-3 py-1.5">
+      {/* Chrome is in-flow, not overlaid: a WebView is a native view
+          layered above GPUI content, so absolute bars would hide under
+          the page. */}
+      <View class="flex-row items-center gap-3 border-b border-zinc-800 bg-zinc-950 px-3 py-2">
+        <View role="button" onPress={back} class="rounded-lg bg-zinc-800 px-3 py-1.5">
           <Text class="text-sm font-semibold text-white">‹ Back</Text>
         </View>
         <Text class="flex-1 text-sm font-semibold text-white" style={{ numberOfLines: 1 }}>
@@ -174,28 +167,35 @@ export function Player() {
         <View
           role="button"
           onPress={() => showSources.set(!showSources())}
-          class="rounded-lg bg-black/50 px-3 py-1.5"
+          class="rounded-lg bg-zinc-800 px-3 py-1.5"
         >
           <Text class="text-sm font-semibold text-white">{sourceId()}</Text>
         </View>
       </View>
 
+      <View class="flex-1">
+        <If when={src}>
+          {(u) => (
+            <WebView
+              ref={(node) => webview.set(node)}
+              src={u()}
+              class="flex-1"
+              userAgent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+              injectedJavaScript={RATE_GUARD}
+              onError={(e) => error.set(String(e))}
+            />
+          )}
+        </If>
+        <If when={!src}>
+          <View class="flex-1 items-center justify-center">
+            <Text class="text-zinc-400">This source cannot play this title.</Text>
+          </View>
+        </If>
+      </View>
+
       {/* Source picker */}
       <If when={showSources()}>
-        <View
-          style={{
-            position: "absolute",
-            bottom: 0,
-            left: 0,
-            right: 0,
-            maxHeight: "50%",
-            borderTopWidth: 1,
-            borderTopColor: "#27272a",
-            backgroundColor: "rgba(9,9,11,0.95)",
-            padding: 12,
-            gap: 4,
-          }}
-        >
+        <View class="max-h-[50%] gap-1 border-t border-zinc-800 bg-zinc-950 p-3">
           <Text class="pb-1 text-xs font-bold uppercase text-zinc-500">Sources</Text>
           <Each of={sourcesFor((r.name === "player" ? r.type : "movie") as MediaType)}>
             {(s) => (
@@ -220,17 +220,7 @@ export function Player() {
       </If>
 
       {/* Bottom bar: progress + next episode */}
-      <View
-        style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          gap: 8,
-          padding: 12,
-          backgroundColor: "rgba(0,0,0,0.75)",
-        }}
-      >
+      <View class="gap-2 border-t border-zinc-800 bg-zinc-950 p-3">
         <If when={error()}>
           {(e) => <Text class="text-xs text-red-400">{e()}</Text>}
         </If>

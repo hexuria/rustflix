@@ -1,10 +1,12 @@
 // Home: a hero banner over horizontal rows, like Streambert's HomePage.
 
-import { computed, signal, Text, View } from "nsh";
+import { computed, effect, signal, Text, View } from "nsh";
 import { Image } from "nsh";
 import { aniTitle, aniTrending, type AniMedia } from "../lib/anilist";
 import { goTitle, navigate } from "../lib/router";
 import {
+  currentKey,
+  hasKey,
   imgUrl,
   isMovie,
   nowPlaying,
@@ -28,10 +30,13 @@ const nowPlayingMedia = signal<Media[]>([]);
 const anime = signal<AniMedia[]>([]);
 const error = signal("");
 
-let started = false;
+// Reloads when the key changes (setup/settings), not just once at mount.
+let loadedFor = "";
 function load() {
-  if (started) return;
-  started = true;
+  const k = currentKey();
+  if (!k || k === loadedFor) return;
+  loadedFor = k;
+  error.set("");
   trending()
     .then((r) => {
       trendingMedia.set(r);
@@ -100,7 +105,10 @@ function TmdbRow(props: { title: string; items: Media[]; type: "movie" | "tv" })
 }
 
 export function Home() {
-  load();
+  effect(() => {
+    hasKey();
+    load();
+  });
   return (
     <View class="flex-1">
       <Hero />

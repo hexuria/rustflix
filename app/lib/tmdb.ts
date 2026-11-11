@@ -94,6 +94,10 @@ export function hasKey(): boolean {
   return apiKey().length > 0;
 }
 
+export function currentKey(): string {
+  return apiKey();
+}
+
 async function tmdb<T>(path: string): Promise<T> {
   const sep = path.includes("?") ? "&" : "?";
   const key = apiKey();

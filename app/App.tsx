@@ -1,7 +1,7 @@
 // rustflix app shell: sidebar navigation + the routed screen.
 // The whole UI is TSX; the GPUI host only provides the window.
 
-import { computed, mount, Text, View } from "nsh";
+import { computed, mount, signal, Text, View } from "nsh";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { navigate, route } from "./lib/router";
 import { loadLibrary } from "./lib/store";
@@ -97,13 +97,17 @@ function SwitchScreen() {
   );
 }
 
+// Boot: restore the persisted key and library before any screen mounts,
+// so the first fetch already carries the key.
+const ready = signal(false);
+void Promise.all([loadKey(), loadLibrary()]).then(() => ready.set(true));
+
 export function App() {
-  // Boot: load the persisted key and library once.
-  void loadKey();
-  void loadLibrary();
   return (
     <View class="flex-1 bg-background">
-      <Shell />
+      <If when={ready()}>
+        <Shell />
+      </If>
     </View>
   );
 }

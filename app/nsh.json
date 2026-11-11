@@ -7,6 +7,8 @@
   "capabilities": {
     "network": {
       "hosts": [
+        "api.themoviedb.org",
+        "*.themoviedb.org",
         "*.tmdb.org",
         "api.anilist.co",
         "graphql.anilist.co",

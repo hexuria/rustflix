@@ -1,0 +1,25 @@
+{
+  "name": "rustflix",
+  "id": "com.hexuria.rustflix",
+  "version": "0.1.0",
+  "build": 1,
+  "appearance": "dark",
+  "capabilities": {
+    "network": {
+      "hosts": [
+        "*.tmdb.org",
+        "api.anilist.co",
+        "graphql.anilist.co",
+        "api.aniskip.com",
+        "hianime.at",
+        "*.hianime.at"
+      ]
+    },
+    "webview": {
+      "hosts": ["*"]
+    },
+    "openUrl": {
+      "schemes": ["https"]
+    }
+  }
+}

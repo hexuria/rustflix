@@ -182,10 +182,10 @@ function MobileControls() {
                 }}
                 accessibilityLabel="Seek"
                 class="flex-1"
-                trackClass="h-1 flex-1 rounded-full bg-white/25"
-                indicatorClass="h-full"
-                rangeClass="rounded-full bg-red-600"
-                thumbClass="h-3 w-3 rounded-full bg-white"
+                trackClass="h-8 flex-1 justify-center px-2.5"
+                indicatorClass="h-2 rounded-full bg-white/25"
+                rangeClass="h-full rounded-full bg-red-600"
+                thumbClass="h-5 w-5 rounded-full bg-white"
               />
               <Text class="w-10 text-[11px] font-medium text-zinc-300">
                 {fmtTime(dur())}
@@ -589,15 +589,6 @@ export function Player() {
           auto-hiding overlay instead. */}
       <If when={showBar()}>
         <View class="flex-col border-t border-zinc-800 bg-zinc-950">
-          {/* Progress line across the top edge of the bar — the closest a
-              GPUI view can get to YouTube's on-video progress bar, since
-              nothing can draw over the native web view. */}
-          <View class="h-[3px] w-full bg-zinc-800">
-            <View
-              class="h-full bg-red-600"
-              style={{ width: `${Math.min(100, Math.max(0, pct()))}%` }}
-            />
-          </View>
           <View class="flex-row items-center gap-1 px-3 py-2">
             <View
               role="button"
@@ -635,10 +626,10 @@ export function Player() {
               }}
               accessibilityLabel="Seek"
               class="flex-1"
-              trackClass="h-1 flex-1 rounded-full bg-zinc-700"
-              indicatorClass="h-full"
-              rangeClass="rounded-full bg-red-600"
-              thumbClass="h-3 w-3 rounded-full bg-white"
+              trackClass="h-5 flex-1 justify-center px-1.5 cursor-pointer"
+              indicatorClass="h-1.5 rounded-full bg-zinc-700"
+              rangeClass="h-full rounded-full bg-red-600"
+              thumbClass="h-3.5 w-3.5 rounded-full bg-white"
             />
             <Text class="w-10 text-[11px] font-medium text-zinc-400">
               {fmtTime(dur())}

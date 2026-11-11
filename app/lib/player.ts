@@ -51,12 +51,18 @@ export const mediaRate = signal(1);
 export const PLAYER_BRIDGE = `(function () {
   if (window.__rf_bridge) return;
   window.__rf_bridge = true;
-  var okRates = { 0.5: 1, 0.75: 1, 1: 1, 1.25: 1, 1.5: 1, 2: 1 };
+  // Rates the embed may use on its own; anything else is snapped back.
+  // A rate the app picked through the palette ('rate' command) is also
+  // allowed, so embeds can't get stuck at e.g. 2x while 2x stays
+  // selectable for the user.
+  var stdRates = { 0.5: 1, 0.75: 1, 1: 1, 1.25: 1, 1.5: 1 };
+  var allowedRate = null;
   var pendingSeek = null;
   var fixRate = function (v) {
-    if (v && v.playbackRate && !okRates[v.playbackRate]) {
-      try { v.playbackRate = 1; } catch (e) {}
-    }
+    if (!v || !v.playbackRate) return;
+    var r = v.playbackRate;
+    if (r === allowedRate || stdRates[r]) return;
+    try { v.playbackRate = allowedRate || 1; } catch (e) {}
   };
   document.addEventListener('play', function (e) { fixRate(e.target); }, true);
   document.addEventListener('ratechange', function (e) { fixRate(e.target); }, true);
@@ -72,7 +78,7 @@ export const PLAYER_BRIDGE = `(function () {
       else if (m.t === 'pause') v.pause();
       else if (m.t === 'toggle') { v.paused ? v.play() : v.pause(); }
       else if (m.t === 'seekby') v.currentTime = Math.max(0, (v.currentTime || 0) + m.s);
-      else if (m.t === 'rate' && m.r) v.playbackRate = m.r;
+      else if (m.t === 'rate' && m.r) { allowedRate = m.r; v.playbackRate = m.r; }
       else if (m.t === 'track' && v.textTracks) {
         var ts = v.textTracks;
         for (var k = 0; k < ts.length; k++) {
@@ -86,7 +92,11 @@ export const PLAYER_BRIDGE = `(function () {
     try { v = document.querySelector('video'); } catch (e) { return; }
     if (!v) return;
     if (pendingSeek != null) {
-      try { v.currentTime = pendingSeek; pendingSeek = null; } catch (e) {}
+      // Clear BEFORE assigning: if currentTime throws (video has no src
+      // yet), a stale pendingSeek must not re-fire every tick forever.
+      var p = pendingSeek;
+      pendingSeek = null;
+      try { v.currentTime = p; } catch (e) {}
     }
     var tracks = [];
     try {
@@ -552,7 +562,16 @@ function armResume() {
   send({ t: "seek", p: pos });
   resumeTimer = setInterval(() => {
     tries++;
-    if (tries > 60 || Math.abs(position() - pos) < 10) {
+    const t = position();
+    // Done when the page reports we're at the saved spot, or clearly
+    // past it. Give up quickly if the embed keeps resetting to ~0 —
+    // fighting it forever makes the video unusable.
+    if (
+      tries > 5 ||
+      Math.abs(t - pos) < 10 ||
+      t > pos + 30 ||
+      (tries >= 3 && t < 10)
+    ) {
       if (resumeTimer) clearInterval(resumeTimer);
       return;
     }

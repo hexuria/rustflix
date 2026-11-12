@@ -54,9 +54,47 @@ export interface DownloadItem {
   message: string;
   /** Live child handle for cancellation (not persisted). */
   proc?: { kill?: () => void };
+  /** Title identity for matching the player route to this download. */
+  key?: string;
+  type?: MediaType;
+  mediaId?: number;
+  season?: number;
+  episode?: number;
+  title?: string;
+  /** Folder the downloader writes to and the resolved media file. */
+  dir?: string;
+  file?: string;
+  createdAt?: number;
 }
 
 export const downloads = signal<DownloadItem[]>([]);
+
+const DL_KEY = "rustflix.downloads.v1";
+
+function persistDownloads() {
+  const slim = downloads()
+    .filter((d) => d.key || d.status !== "error")
+    .slice(0, 100)
+    .map(({ proc: _proc, ...rest }) => rest);
+  void Storage.setItem(DL_KEY, JSON.stringify(slim));
+}
+
+/** Loads persisted downloads at boot (running ones come back as errors —
+ * their processes died with the last session). */
+export async function loadDownloads() {
+  try {
+    const raw = await Storage.getItem(DL_KEY);
+    if (!raw) return;
+    const list = JSON.parse(raw) as DownloadItem[];
+    downloads.set(
+      list.map((d) =>
+        d.status === "running"
+          ? { ...d, status: "error", message: "interrupted", progress: null }
+          : d,
+      ),
+    );
+  } catch {}
+}
 
 // --- Page bridge ------------------------------------------------------------
 //
@@ -764,6 +802,10 @@ export function persist() {
 export function playerUrl(): string | null {
   const r = playerRoute();
   if (!r) return null;
+  // A completed download for this exact title/episode plays the local
+  // file — no stream resolution, no network.
+  const local = localPageFor(r);
+  if (local) return local;
   const sid = sourceId();
   const src = PLAYER_SOURCES.find((s) => s.id === sid);
   // Sources keyed on IMDb need the external id resolved first; until it
@@ -912,6 +954,7 @@ let dlSeq = 0;
 
 function patchDownload(id: number, patch: Partial<DownloadItem>) {
   downloads.set(downloads().map((d) => (d.id === id ? { ...d, ...patch } : d)));
+  persistDownloads();
 }
 
 function failDownload(name: string, message: string) {
@@ -919,6 +962,7 @@ function failDownload(name: string, message: string) {
   downloads.set(
     [{ id: ++dlSeq, name, status: "error", progress: null, message }, ...downloads()].slice(0, 20),
   );
+  persistDownloads();
 }
 
 /** Asks the page for its fetched media URLs and stores the answer. */
@@ -1098,10 +1142,18 @@ function startDownloadInner() {
     return;
   }
   const id = ++dlSeq;
+  const r = playerRoute();
   debug("download: start", { name, url: url.slice(0, 120), bin, dir });
   downloads.set(
-    [{ id, name, status: "running", progress: null, message: "starting…", proc: proc as { kill?: () => void } }, ...downloads()].slice(0, 20),
+    [{
+      id, name, status: "running", progress: null, message: "starting…",
+      proc: proc as { kill?: () => void },
+      key: r ? itemKey(r.type, r.id, r.season ?? 0, r.episode ?? 0) : undefined,
+      type: r?.type, mediaId: r?.id, season: r?.season, episode: r?.episode,
+      title: r?.title, dir, createdAt: Date.now(),
+    }, ...downloads()].slice(0, 20),
   );
+  persistDownloads();
   const onLine = (line: string) => {
     const d = downloads().find((x) => x.id === id);
     if (!d || d.status !== "running") return;
@@ -1113,6 +1165,7 @@ function startDownloadInner() {
     proc.on("exit", (res: { code: number | null; signal?: string | null; error?: string }) => {
       if (res.code === 0) {
         patchDownload(id, { status: "done", progress: 100, message: "finished" });
+        void finishDownload(id);
       } else {
         patchDownload(id, {
           status: "error",
@@ -1121,6 +1174,251 @@ function startDownloadInner() {
       }
     });
   } catch {}
+}
+
+/** Runs a shell command and collects its stdout lines. */
+function shellLines(cmd: string): Promise<string[]> {
+  return new Promise((resolve) => {
+    try {
+      const proc = process.spawn("/bin/sh", ["-c", cmd], { lines: true });
+      const out: string[] = [];
+      proc.on("stdout", (line: string) => out.push(line));
+      proc.on("exit", () => resolve(out));
+      proc.on("error", () => resolve(out));
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+const VIDEO_EXT = /\.(mp4|m4v|webm|mov|mkv|ts|m2ts)$/i;
+
+/** After a successful download: find the file the downloader actually
+ * wrote (the name is uniquified, the extension is the muxer's choice) and
+ * generate a tiny player page next to it. Playback goes through
+ * ensureLocalServer — a localhost server with Range support. */
+async function finishDownload(id: number) {
+  const d = downloads().find((x) => x.id === id);
+  if (!d?.dir || !d.name || process.platform === "win32") return;
+  const lines = await shellLines(`ls -t ${shq(d.dir)}`);
+  const base = d.name;
+  const file = lines
+    .map((l) => l.trim())
+    .find(
+      (l) =>
+        VIDEO_EXT.test(l) &&
+        (l === base ||
+          l.startsWith(`${base}.`) ||
+          l.startsWith(`${base} (`)),
+    );
+  if (!file) {
+    patchDownload(id, { message: "finished (file not found)" });
+    return;
+  }
+  const path = `${d.dir}/${file}`;
+  const page = `${d.dir}/.rustflix-player.html`;
+  const src = encodeURIComponent(file);
+  const html =
+    "<!doctype html><meta charset=utf-8>" +
+    "<style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain}</style>" +
+    `<video src="${src}" playsinline webkit-playsinline preload="metadata"></video>` +
+    "<scr" + "ipt>var v=document.querySelector('video');v.play().catch(function(){});</scr" + "ipt>";
+  await shellLines(`printf %s ${shq(toBase64(html))} | base64 -d > ${shq(page)}`);
+  patchDownload(id, { file: path, message: "finished" });
+}
+
+/** Minimal base64 encoder over an ASCII string (the JS engine has no
+ * btoa and the generated page is kept ASCII-only). */
+function toBase64(s: string): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < s.length; i += 3) {
+    const a = s.charCodeAt(i) & 0xff;
+    const b = i + 1 < s.length ? s.charCodeAt(i + 1) & 0xff : 0;
+    const c = i + 2 < s.length ? s.charCodeAt(i + 2) & 0xff : 0;
+    out += chars[a >> 2] + chars[((a & 3) << 4) | (b >> 4)];
+    out += i + 1 < s.length ? chars[((b & 15) << 2) | (c >> 6)] : "=";
+    out += i + 2 < s.length ? chars[c & 63] : "=";
+  }
+  return out;
+}
+
+// A completed download plays through a tiny localhost server: the app's
+// webview capability only grants http(s) hosts, so file:// is refused —
+// but 127.0.0.1 is covered by webview.hosts "*". One server per download
+// directory, spawned lazily on first play, kept for the session. Video
+// needs HTTP Range support for seeking, so it is not plain
+// `http.server` — the script below answers single byte ranges.
+
+const LOCAL_SERVER_PY = `import http.server, socketserver, os, sys, re
+os.chdir(sys.argv[1])
+class H(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def send_head(self):
+        self._range_left = None
+        rng = self.headers.get("Range")
+        path = self.translate_path(self.path)
+        if not rng or not os.path.isfile(path):
+            return super().send_head()
+        m = re.match(r"bytes=(\\d*)-(\\d*)", rng)
+        if not m or (not m.group(1) and not m.group(2)):
+            return super().send_head()
+        size = os.path.getsize(path)
+        if m.group(1):
+            a = int(m.group(1))
+            b = int(m.group(2)) if m.group(2) else size - 1
+        else:
+            a = max(0, size - int(m.group(2)))
+            b = size - 1
+        b = min(b, size - 1)
+        if a >= size or a > b:
+            self.send_error(416)
+            return None
+        self.send_response(206)
+        self.send_header("Content-Type", self.guess_type(path))
+        self.send_header("Content-Range", "bytes %d-%d/%d" % (a, b, size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.end_headers()
+        f = open(path, "rb")
+        f.seek(a)
+        self._range_left = b - a + 1
+        return f
+    def copyfile(self, source, outputfile):
+        left = self._range_left
+        if left is None:
+            return super().copyfile(source, outputfile)
+        while left > 0:
+            data = source.read(min(65536, left))
+            if not data:
+                break
+            outputfile.write(data)
+            left -= len(data)
+        self._range_left = None
+s = socketserver.TCPServer(("127.0.0.1", 0), H)
+s.timeout = 1.0
+parent = os.getppid()
+print(s.server_address[1], flush=True)
+# Exit when the app dies: an orphaned server would keep the port (and the
+# download directory) alive forever.
+while os.getppid() == parent:
+    s.handle_request()`;
+
+/** dir → "starting" | "ready" | "failed"; dir → page URL once ready. */
+const localServerState = signal<Record<string, "starting" | "ready" | "failed">>({});
+const localPages = signal<Record<string, string>>({});
+const localProcs = new Map<string, { kill?: () => void }>();
+
+const PY_CANDIDATES = ["/usr/bin/python3", "python3", "python"];
+
+function ensureLocalServer(dir: string) {
+  const st = localServerState()[dir];
+  if (st === "ready" || st === "starting" || st === "failed") return;
+  localServerState.set({ ...localServerState(), [dir]: "starting" });
+  const setState = (s: "ready" | "failed") =>
+    localServerState.set({ ...localServerState(), [dir]: s });
+  const tryBin = (i: number) => {
+    if (i >= PY_CANDIDATES.length) {
+      setState("failed");
+      return;
+    }
+    let settled = false;
+    const next = () => {
+      if (!settled) {
+        settled = true;
+        tryBin(i + 1);
+      }
+    };
+    let proc: ReturnType<typeof process.spawn>;
+    try {
+      proc = process.spawn(PY_CANDIDATES[i], ["-c", LOCAL_SERVER_PY, dir], { lines: true });
+    } catch {
+      next();
+      return;
+    }
+    let gotPort = false;
+    proc.on("stdout", (line: string) => {
+      if (gotPort || settled) return;
+      const port = Number(line.trim());
+      if (!port) return;
+      gotPort = true;
+      settled = true;
+      localProcs.set(dir, proc as { kill?: () => void });
+      localPages.set({
+        ...localPages(),
+        [dir]: `http://127.0.0.1:${port}/.rustflix-player.html`,
+      });
+      setState("ready");
+    });
+    proc.on("exit", next);
+    proc.on("error", next);
+    // A server that never prints a port is not coming up.
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          (proc as { kill?: () => void }).kill?.();
+        } catch {}
+        tryBin(i + 1);
+      }
+    }, 8000);
+  };
+  tryBin(0);
+}
+
+/** The localhost player page for this route's completed download, if
+ * one exists and its server is up — playback then needs no network. */
+function localPageFor(r: PlayerRoute): string | null {
+  const key = itemKey(r.type, r.id, r.season ?? 0, r.episode ?? 0);
+  const d = downloads().find((x) => x.status === "done" && x.dir && x.file && x.key === key);
+  if (!d?.dir) return null;
+  const state = localServerState()[d.dir];
+  if (state === "failed") return null;
+  const page = localPages()[d.dir];
+  if (page) return page;
+  ensureLocalServer(d.dir);
+  return null;
+}
+
+/** Reveal a download's folder in the OS file manager. */
+export function revealDownload(d: DownloadItem) {
+  if (!d.dir) return;
+  const cmd =
+    process.platform === "darwin"
+      ? `open -R ${shq(d.file ?? d.dir)}`
+      : process.platform === "win32"
+        ? `explorer /select,${d.dir}`
+        : `xdg-open ${shq(d.dir)}`;
+  void shellLines(cmd);
+}
+
+/** Remove a download record; the media file goes to the trash too. */
+export function removeDownload(d: DownloadItem) {
+  downloads.set(downloads().filter((x) => x.id !== d.id));
+  persistDownloads();
+  if (d.file) {
+    const cmd =
+      process.platform === "darwin"
+        ? `mv ${shq(d.file)} ${shq(`${process.env.HOME ?? ""}/.Trash/`)}`
+        : process.platform === "win32"
+          ? `del ${shq(d.file)}`
+          : `rm -f ${shq(d.file)}`;
+    void shellLines(cmd);
+  }
+}
+
+/** Opens the player for a finished download — it resolves to the local
+ * file automatically through playerUrl(). */
+export function playDownload(d: DownloadItem) {
+  if (!d.type || !d.mediaId) return;
+  navigate({
+    name: "player",
+    type: d.type,
+    id: d.mediaId,
+    season: d.season,
+    episode: d.episode,
+    title: d.title,
+  });
 }
 
 /** Kills a running download's process tree. */

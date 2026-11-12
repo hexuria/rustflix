@@ -9,6 +9,7 @@ export type Route =
   | { name: "home" }
   | { name: "search" }
   | { name: "library" }
+  | { name: "downloads" }
   | { name: "settings" }
   | { name: "setup" }
   | { name: "title"; type: MediaType; id: number }

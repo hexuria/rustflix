@@ -8,8 +8,10 @@ import { TabBar } from "nsh/mobile";
 import { hasKey, loadKey } from "./lib/tmdb";
 import { canGoBack, canGoForward, goBack, goForward, navigate, route } from "./lib/router";
 import {
+  canDownload,
   choosePaletteIndex,
   closePalette,
+  loadDownloads,
   nextEpisode,
   prevEpisode,
   runAutotest,
@@ -18,6 +20,7 @@ import {
   togglePalette,
 } from "./lib/player";
 import { loadLibrary } from "./lib/store";
+import { Downloads } from "./screens/Downloads";
 import { Home } from "./screens/Home";
 import { Library } from "./screens/Library";
 import { Player } from "./screens/Player";
@@ -184,6 +187,13 @@ function Shell() {
           <NavItem label="Home" active={r()?.name === "home"} onPress={() => nav("home")} />
           <NavItem label="Search" active={r()?.name === "search"} onPress={() => nav("search")} />
           <NavItem label="My List" active={r()?.name === "library"} onPress={() => nav("library")} />
+          <If when={canDownload()}>
+            <NavItem
+              label="Downloads"
+              active={r()?.name === "downloads"}
+              onPress={() => nav("downloads")}
+            />
+          </If>
           <NavItem label="Settings" active={r()?.name === "settings"} onPress={() => nav("settings")} />
           <View class="flex-1" />
           <If when={needsSetup()}>
@@ -200,7 +210,7 @@ function Shell() {
   );
 }
 
-function nav(name: "home" | "search" | "library" | "settings" | "setup") {
+function nav(name: "home" | "search" | "library" | "downloads" | "settings" | "setup") {
   navigate({ name });
 }
 
@@ -216,6 +226,9 @@ function SwitchScreen() {
       </If>
       <If when={r()?.name === "library"}>
         <Library />
+      </If>
+      <If when={r()?.name === "downloads"}>
+        <Downloads />
       </If>
       <If when={r()?.name === "settings"}>
         <SettingsScreen />
@@ -258,7 +271,7 @@ function SwitchScreen() {
 // Boot: restore the persisted key and library before any screen mounts,
 // so the first fetch already carries the key.
 const ready = signal(false);
-void Promise.all([loadKey(), loadLibrary()]).then(async () => {
+void Promise.all([loadKey(), loadLibrary(), loadDownloads()]).then(async () => {
   ready.set(true);
   // Headless verification hook: `rustflix.autotest` in storage drives
   // the player through scripted actions (removed after one run).

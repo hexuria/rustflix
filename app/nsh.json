@@ -24,7 +24,7 @@
       "schemes": ["https"]
     },
     "process": {
-      "execute": ["/bin/sh", "cmd.exe"]
+      "execute": ["/bin/sh", "cmd.exe", "python3", "/usr/bin/python3", "python"]
     }
   }
 }

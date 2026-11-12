@@ -13,7 +13,7 @@
 // `window.nsh.postMessage`, which arrives as the WebView's `onMessage`.
 // There is no evaluate()-with-return on this platform.
 
-import { computed, keymap, signal, Storage } from "nsh";
+import { computed, host, keymap, signal, Storage } from "nsh";
 import type { WebViewRef } from "nsh";
 import process from "process";
 import { aniDetails } from "./anilist";
@@ -64,6 +64,8 @@ export interface DownloadItem {
   /** Folder the downloader writes to and the resolved media file. */
   dir?: string;
   file?: string;
+  /** iOS native downloads: "file" (localhost playback) or "hls" (native player). */
+  kind?: string;
   createdAt?: number;
 }
 
@@ -82,6 +84,22 @@ function persistDownloads() {
 /** Loads persisted downloads at boot (running ones come back as errors —
  * their processes died with the last session). */
 export async function loadDownloads() {
+  if (IOS_HOST && iosHostUp) {
+    bindIosDownloadEvents();
+    try {
+      const list = await host.call("dl.list");
+      if (Array.isArray(list)) {
+        downloads.set(
+          (list as DownloadItem[]).map((d) =>
+            d.status === "running"
+              ? { ...d, status: "error", message: "interrupted", progress: null }
+              : d,
+          ),
+        );
+        return;
+      }
+    } catch {}
+  }
   try {
     const raw = await Storage.getItem(DL_KEY);
     if (!raw) return;
@@ -942,6 +960,51 @@ export function setTrack(i: number) {
   send({ t: "track", i });
 }
 
+// --- iOS native downloads -----------------------------------------------------
+//
+// iOS can't spawn vid-dl, so downloads go through `nsh/host` to the
+// embedding app's DownloadManager (URLSession for files, Apple's
+// AVAssetDownloadURLSession for HLS). Same DownloadItem records, same UI.
+
+const IOS_HOST = process.platform === "ios";
+let iosHostUp = false;
+try {
+  iosHostUp = IOS_HOST && host.available();
+} catch {}
+
+/** download id → localhost player URL, once the native server answers. */
+const iosPages = signal<Record<number, string>>({});
+const iosPageTried = new Set<number>();
+
+function ensureIosPage(id: number) {
+  if (iosPageTried.has(id) || !(IOS_HOST && iosHostUp)) return;
+  iosPageTried.add(id);
+  host
+    .call("dl.playUrl", { id })
+    .then((res: unknown) => {
+      const url = (res as { url?: string } | null)?.url;
+      if (url) iosPages.set({ ...iosPages(), [id]: url });
+    })
+    .catch(() => {});
+}
+
+let iosEventsBound = false;
+function bindIosDownloadEvents() {
+  if (iosEventsBound || !(IOS_HOST && iosHostUp)) return;
+  iosEventsBound = true;
+  host.on("dl.event", (data: unknown) => {
+    const d = data as Partial<DownloadItem> | null;
+    if (typeof d?.id !== "number") return;
+    if (!downloads().some((x) => x.id === d.id)) return;
+    downloads.set(
+      downloads().map((x) =>
+        x.id === d.id ? { ...x, ...d, proc: undefined } : x,
+      ),
+    );
+    persistDownloads();
+  });
+}
+
 // --- Downloads -----------------------------------------------------------------
 //
 // Streambert captures the HLS URL through Electron request interception;
@@ -1042,10 +1105,12 @@ export function startDownload() {
   }
 }
 
-/** Subprocess downloads need a desktop OS (iOS/Android can't spawn). */
+/** Subprocess downloads need a desktop OS; iOS goes through the native
+ * DownloadManager instead (nsh/host), which needs the embedding app. */
 export function canDownload(): boolean {
   const p = process.platform;
-  return p !== "ios" && p !== "android";
+  if (p === "ios") return iosHostUp;
+  return p !== "android";
 }
 
 function homeDir(): string {
@@ -1071,7 +1136,41 @@ export function defaultDownloaderPath(): string {
   return `${homeDir()}${sep}Downloads${sep}vid-dl${sep}${plat}_${arch}-portable${sep}${exe}`;
 }
 
+/** Stream CDNs reject bare requests; the page bridge captured the headers
+ * it used per stream URL. Forward them plus the embed origin as Referer
+ * and a browser UA — vid-dl gets them as --add-header args, iOS as a
+ * header dict for URLSession/AVURLAsset. */
+function streamHeaderMap(url: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  const rawHdrs = streamHeaders()[url] || {};
+  for (const k in rawHdrs) {
+    const v = String(rawHdrs[k]);
+    if (v && !/[\r\n]/.test(v)) map[k] = v;
+  }
+  try {
+    const page = playerUrl();
+    const origin = page ? new URL(page).origin : "";
+    const hasRef = Object.keys(map).some((k) => k.toLowerCase() === "referer");
+    // vid-dl's header fallback rebuilds http_headers per retry domain, so
+    // --referer/--user-agent opts get overridden — --add-header survives as
+    // the "default headers" attempt that runs before domain retries.
+    if (origin && !hasRef) map["Referer"] = `${origin}/`;
+    // Stream CDNs 403 anything that doesn't look like the browser that
+    // fetched the playlist — the downloader's default UA gets rejected.
+    if (!Object.keys(map).some((k) => k.toLowerCase() === "user-agent")) {
+      map["User-Agent"] =
+        streamUA() ||
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+    }
+  } catch {}
+  return map;
+}
+
 function startDownloadInner() {
+  if (IOS_HOST && iosHostUp) {
+    void startIosDownload();
+    return;
+  }
   const name = downloadName();
   const url = bestStreamUrl();
   if (!url) {
@@ -1104,30 +1203,11 @@ function startDownloadInner() {
     "-n", shq(name), "-d", shq(dir),
   ];
   // Stream CDNs reject bare yt-dlp requests; forward the headers the page
-  // itself used (captured by the bridge), plus the embed origin as
-  // Referer when the page didn't set one explicitly.
-  const extra: string[] = [];
-  const rawHdrs = streamHeaders()[url] || {};
-  for (const k in rawHdrs) {
-    const v = String(rawHdrs[k]);
-    if (v && !/[\r\n]/.test(v)) {
-      extra.push(`--add-header "${k}: ${v.replace(/"/g, "")}"`);
-    }
-  }
-  try {
-    const page = playerUrl();
-    const origin = page ? new URL(page).origin : "";
-    const hasRef = Object.keys(rawHdrs).some((k) => k.toLowerCase() === "referer");
-    // vid-dl's header fallback rebuilds http_headers per retry domain, so
-    // --referer/--user-agent opts get overridden — --add-header survives as
-    // the "default headers" attempt that runs before domain retries.
-    if (origin && !hasRef) extra.push(`--add-header "Referer: ${origin}/"`);
-    // Stream CDNs 403 anything that doesn't look like the browser that
-    // fetched the playlist — yt-dlp's default UA gets rejected outright.
-    const ua = streamUA() ||
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
-    extra.push(`--add-header "User-Agent: ${ua.replace(/"/g, "")}"`);
-  } catch {}
+  // itself used (captured by the bridge), plus Referer/UA fallbacks.
+  const hdrMap = streamHeaderMap(url);
+  const extra = Object.entries(hdrMap).map(
+    ([k, v]) => `--add-header "${k}: ${v.replace(/"/g, "")}"`,
+  );
   if (extra.length) inner.push("-a", shq(extra.join(" ")));
   const innerCmd = inner.join(" ");
   const isWin = process.platform === "windows";
@@ -1174,6 +1254,56 @@ function startDownloadInner() {
       }
     });
   } catch {}
+}
+
+/** iOS: hand the stream to the native DownloadManager (URLSession for
+ * progressive files, AVAssetDownloadURLSession for HLS). The Swift side
+ * reports progress back through `dl.event`. */
+async function startIosDownload() {
+  const name = downloadName();
+  const url = bestStreamUrl();
+  if (!url) {
+    refreshStreams();
+    failDownload(name, "No stream detected yet — let the video play a few seconds, then try again.");
+    return;
+  }
+  const r = playerRoute();
+  const meta = r
+    ? {
+        key: itemKey(r.type, r.id, r.season ?? 0, r.episode ?? 0),
+        type: r.type,
+        mediaId: r.id,
+        season: r.season ?? null,
+        episode: r.episode ?? null,
+        title: r.title ?? null,
+      }
+    : {};
+  const kind = /\.m3u8(\?|#|$)/i.test(url) ? "hls" : "file";
+  debug("download ios: start", { name, url: url.slice(0, 120), kind });
+  try {
+    const res = (await host.call("dl.start", {
+      url,
+      name,
+      kind,
+      headers: streamHeaderMap(url),
+      meta,
+    })) as { ok?: boolean; id?: number; error?: string } | null;
+    if (!res?.ok || typeof res.id !== "number") {
+      failDownload(name, res?.error ?? "Download failed to start");
+      return;
+    }
+    downloads.set(
+      [{
+        id: res.id, name, status: "running", progress: null, message: "starting…",
+        key: meta.key as string | undefined, type: r?.type, mediaId: r?.id,
+        season: r?.season, episode: r?.episode, title: r?.title,
+        kind, createdAt: Date.now(),
+      } as DownloadItem, ...downloads()].slice(0, 20),
+    );
+    persistDownloads();
+  } catch (e) {
+    failDownload(name, `Download failed: ${String(e).slice(0, 140)}`);
+  }
 }
 
 /** Runs a shell command and collects its stdout lines. */
@@ -1370,8 +1500,20 @@ function ensureLocalServer(dir: string) {
  * one exists and its server is up — playback then needs no network. */
 function localPageFor(r: PlayerRoute): string | null {
   const key = itemKey(r.type, r.id, r.season ?? 0, r.episode ?? 0);
-  const d = downloads().find((x) => x.status === "done" && x.dir && x.file && x.key === key);
-  if (!d?.dir) return null;
+  const d = downloads().find(
+    (x) =>
+      x.status === "done" &&
+      x.key === key &&
+      ((x.dir && x.file) || (IOS_HOST && x.file)),
+  );
+  if (!d) return null;
+  if (!d.dir) {
+    // iOS file download: the page URL comes from the native media server.
+    const page = iosPages()[d.id];
+    if (page) return page;
+    ensureIosPage(d.id);
+    return null;
+  }
   const state = localServerState()[d.dir];
   if (state === "failed") return null;
   const page = localPages()[d.dir];
@@ -1380,8 +1522,12 @@ function localPageFor(r: PlayerRoute): string | null {
   return null;
 }
 
-/** Reveal a download's folder in the OS file manager. */
+/** Reveal a download's folder in the OS file manager (iOS: share sheet). */
 export function revealDownload(d: DownloadItem) {
+  if (IOS_HOST && iosHostUp) {
+    void host.call("dl.reveal", { id: d.id }).catch(() => {});
+    return;
+  }
   if (!d.dir) return;
   const cmd =
     process.platform === "darwin"
@@ -1396,6 +1542,10 @@ export function revealDownload(d: DownloadItem) {
 export function removeDownload(d: DownloadItem) {
   downloads.set(downloads().filter((x) => x.id !== d.id));
   persistDownloads();
+  if (IOS_HOST && iosHostUp) {
+    void host.call("dl.remove", { id: d.id }).catch(() => {});
+    return;
+  }
   if (d.file) {
     const cmd =
       process.platform === "darwin"
@@ -1408,8 +1558,13 @@ export function removeDownload(d: DownloadItem) {
 }
 
 /** Opens the player for a finished download — it resolves to the local
- * file automatically through playerUrl(). */
+ * file automatically through playerUrl(). Legacy HLS downloads without a
+ * local playlist play in the native AVPlayerViewController instead. */
 export function playDownload(d: DownloadItem) {
+  if (IOS_HOST && iosHostUp && d.kind === "hls" && !d.file) {
+    void host.call("dl.play", { id: d.id }).catch(() => {});
+    return;
+  }
   if (!d.type || !d.mediaId) return;
   navigate({
     name: "player",
@@ -1421,9 +1576,12 @@ export function playDownload(d: DownloadItem) {
   });
 }
 
-/** Kills a running download's process tree. */
+/** Kills a running download's process tree (iOS: cancels the URLSession). */
 export function cancelDownload(id: number) {
   const d = downloads().find((x) => x.id === id);
+  if (IOS_HOST && iosHostUp) {
+    void host.call("dl.cancel", { id }).catch(() => {});
+  }
   patchDownload(id, { status: "error", message: "cancelled" });
   try {
     d?.proc?.kill?.();
@@ -1853,6 +2011,8 @@ export async function runAutotest(cfg: AutotestConfig) {
     navigate({ name: "settings" });
   } else if (screen === "setup") {
     navigate({ name: "setup" });
+  } else if (screen === "downloads") {
+    navigate({ name: "downloads" });
   } else if (screen === "player" && cfg.type && cfg.id) {
     navigate({
       name: "player",
@@ -1874,6 +2034,10 @@ export async function runAutotest(cfg: AutotestConfig) {
     else if (a === "play") send({ t: "play" });
     else if (a === "pause") pausePlayback();
     else if (a === "download") startDownload();
+    else if (a.startsWith("playDownload:")) {
+      const d = downloads().find((x) => x.id === Number(a.slice(13)));
+      if (d) playDownload(d);
+    }
     else if (a === "streams") refreshStreams();
     else if (a === "space") {
       // GPUI's WebView has no sendInput; dispatch a synthetic keydown the

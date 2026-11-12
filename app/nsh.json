@@ -23,6 +23,7 @@
     "openUrl": {
       "schemes": ["https"]
     },
+    "host": ["dl.*"],
     "process": {
       "execute": ["/bin/sh", "cmd.exe", "python3", "/usr/bin/python3", "python"]
     }

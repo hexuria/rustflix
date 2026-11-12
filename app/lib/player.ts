@@ -2048,6 +2048,14 @@ export async function runAutotest(cfg: AutotestConfig) {
         );
       } catch {}
     }
+    else if (a.startsWith("js:")) {
+      const code = a.slice(3);
+      try {
+        webview()?.injectJavaScript?.(
+          `(function(){try{var r=(${code});window.nsh&&window.nsh.postMessage(JSON.stringify({t:-9,r:String(r).slice(0,1500)}));}catch(e){window.nsh&&window.nsh.postMessage(JSON.stringify({t:-9,r:"ERR "+e}));}})();`,
+        );
+      } catch {}
+    }
     else if (a.startsWith("seekby:")) seekBy(Number(a.slice(7)));
     else if (a.startsWith("rate:")) setRate(Number(a.slice(5)));
     await autotestWait(1600);

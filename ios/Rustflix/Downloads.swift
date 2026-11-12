@@ -121,7 +121,9 @@ final class LocalMediaServer: @unchecked Sendable {
             send(conn, status: "405 Method Not Allowed", body: Data("method".utf8))
             return
         }
-        let rawPath = String(parts[1]).removingPercentEncoding ?? ""
+        // Strip the query (player pages carry ?f=…) before splitting.
+        let rawPath = (String(parts[1]).removingPercentEncoding ?? "")
+            .split(separator: "?").first.map(String.init) ?? ""
         // Only /<id>/<file> under the download root; reject traversal.
         let comps = rawPath.split(separator: "/").map(String.init)
         guard comps.count == 2,

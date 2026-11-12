@@ -10,6 +10,7 @@ import { Dialog, Slider } from "nsh/base";
 import { canGoBack, goBack, navigate, route } from "../lib/router";
 import {
   cancelDownload,
+  canDownload,
   closePalette,
   debug,
   downloads,
@@ -43,6 +44,7 @@ import {
   setPageKeysBlocked,
   setRate,
   setTrack,
+  startDownload,
   showPalette,
   subTracks,
   showSources,
@@ -55,6 +57,7 @@ import {
   webview,
 } from "../lib/player";
 import { NEEDS_INTERCEPT, sourcesFor, type MediaType } from "../lib/sources";
+import { itemKey } from "../lib/store";
 
 // The last player route we armed for. NSH effects re-run on signal
 // writes, and the player writes signals every probe — without this guard
@@ -123,6 +126,7 @@ const ICONS = {
   nextEp: `<rect x="16.4" y="5" width="2.8" height="14" rx="1" fill="#fff"/><path d="M5.4 5.8v12.4L13.6 12z" fill="#fff"/>`,
   back10: `<path d="M3.5 12a8.5 8.5 0 1 0 2.5-6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/><path d="M3.5 3.8v5.4h5.4" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><text x="12.4" y="14.6" text-anchor="middle" font-size="6.4" font-weight="700" fill="#fff" font-family="-apple-system,sans-serif">10</text>`,
   fwd10: `<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/><path d="M20.5 3.8v5.4h-5.4" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><text x="11.6" y="14.6" text-anchor="middle" font-size="6.4" font-weight="700" fill="#fff" font-family="-apple-system,sans-serif">10</text>`,
+  download: `<path d="M12 4v10.5m0 0-3.8-3.8M12 14.5l3.8-3.8" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 14.5h14v4.5H5z" fill="none" stroke="#fff" stroke-width="1.9" stroke-linejoin="round"/>`,
 } as const;
 
 function Glyph(props: { d: keyof typeof ICONS; size?: number }) {
@@ -188,6 +192,18 @@ function MobileControls() {
     else if (tracks.length > 0) setTrack(tracks[0].i);
   };
   const subsOn = computed(() => subTracks().some((t) => t.mode === "showing"));
+  // This title's download, if one exists — the button doubles as a
+  // progress readout while it runs.
+  const dl = computed(() => {
+    const p = r();
+    if (!p) return null;
+    const key = itemKey(p.type, p.id, p.season ?? 0, p.episode ?? 0);
+    return (
+      downloads().find(
+        (x) => x.key === key && (x.status === "running" || x.status === "done"),
+      ) ?? null
+    );
+  });
   // Single tap toggles the chrome; a double tap seeks ±10s on the side
   // tapped and flashes a cumulative counter that resets after ~2s idle.
   const onTap = (e: { position?: { x: number }; clickCount?: number }) => {
@@ -387,6 +403,26 @@ function MobileControls() {
                 CC
               </Text>
             </View>
+            <If when={canDownload()}>
+              <View
+                role="button"
+                onPress={() => {
+                  pokeControls();
+                  startDownload();
+                }}
+                class={`${circle} ml-2 h-10 w-10`}
+                style={glass}
+              >
+                <If when={dl()?.status === "running"}>
+                  <Text class="text-[10px] font-bold text-white">
+                    {Math.round(dl()?.progress ?? 0)}%
+                  </Text>
+                </If>
+                <If when={dl()?.status !== "running"}>
+                  <Glyph d="download" size={18} />
+                </If>
+              </View>
+            </If>
           </View>
           <View class="flex-row items-center gap-2">
             <Text class="w-11 text-right text-xs font-medium text-zinc-300">

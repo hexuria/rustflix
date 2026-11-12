@@ -135,14 +135,20 @@ const TABS = [
   { title: "Home", icon: "house", route: "home" },
   { title: "Search", icon: "magnifyingglass", route: "search" },
   { title: "My List", icon: "bookmark", route: "library" },
+  { title: "Downloads", icon: "arrow.down.circle", route: "downloads" },
   { title: "Settings", icon: "gearshape", route: "settings" },
 ] as const;
 
 function MobileShell() {
   const r = computed(() => route());
-  const tabIndex = computed(() => TABS.findIndex((t) => t.route === r()?.name));
+  // The downloads tab only exists where the platform can actually
+  // fetch media (iOS native downloader; not on Android).
+  const tabs = computed(() =>
+    TABS.filter((t) => t.route !== "downloads" || canDownload()),
+  );
+  const tabIndex = computed(() => tabs().findIndex((t) => t.route === r()?.name));
   const showBar = computed(() =>
-    ["home", "search", "library", "settings", "setup", "title"].includes(r()?.name ?? ""),
+    ["home", "search", "library", "downloads", "settings", "setup", "title"].includes(r()?.name ?? ""),
   );
   return (
     <View class="flex-1 flex-col bg-background">
@@ -160,13 +166,13 @@ function MobileShell() {
       </View>
       <If when={showBar()}>
         <TabBar
-          items={TABS.map((t) => ({
+          items={tabs().map((t) => ({
             title: t.title,
             icon: platform.select({ ios: t.icon }),
           }))}
-          selectedIndex={tabIndex() >= 0 ? tabIndex() : TABS.length}
+          selectedIndex={tabIndex() >= 0 ? tabIndex() : tabs().length}
           onChange={({ index }) => {
-            const t = TABS[index];
+            const t = tabs()[index];
             if (t) navigate({ name: t.route });
           }}
         />

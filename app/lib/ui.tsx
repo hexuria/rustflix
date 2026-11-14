@@ -537,6 +537,17 @@ function prefetchInRow(url: string) {
 }
 
 /** A tall poster card (140x210 by default) with a title and a subtitle. */
+/** A poster grid for a width: three across on a phone, with the cards as
+ * wide as fit, more as the screen widens. Every column is full: no strip
+ * of unused width beside the last card. */
+export function posterGrid(width: number): { cols: number; cardW: number; gap: number } {
+  const phone = width < 520;
+  const gap = phone ? 12 : 16;
+  const min = phone ? 96 : 150;
+  const cols = Math.max(phone ? 3 : 2, Math.floor((width + gap) / (min + gap)));
+  return { cols, cardW: Math.max(60, Math.floor((width - (cols - 1) * gap) / cols)), gap };
+}
+
 export function PosterCard(props: {
   target: CardTarget;
   image: string;
@@ -546,7 +557,8 @@ export function PosterCard(props: {
   width?: number;
   onPress?: () => void;
 }) {
-  const w = props.width ?? 140;
+  // Read where used: a grid resizes its cards when the screen turns.
+  const w = () => props.width ?? 140;
   // The artwork's view: its frame is where the title page zooms out of.
   let art: ViewRef | undefined;
   const cardKey = `card${++cardSeq}`;
@@ -563,19 +575,19 @@ export function PosterCard(props: {
       onPress={press.onPress}
       onLongPress={press.onLongPress}
       onContextMenu={press.onContextMenu}
-      style={{ width: w }}
+      style={{ width: w() }}
       class="group cursor-pointer gap-1 active:opacity-70"
     >
       <View
         ref={(n: ViewRef) => (art = n)}
         class={`relative rounded-lg bg-muted ${RING}`}
         // Hidden while a poster flight stands for it (lib/hero.tsx).
-        style={{ width: w, height: w * 1.5, opacity: hiddenCard() === cardKey ? 0 : 1 }}
+        style={{ width: w(), height: w() * 1.5, opacity: hiddenCard() === cardKey ? 0 : 1 }}
       >
         <Image
           src={props.image}
           fadeDuration={fade()}
-          style={{ width: w, height: w * 1.5, borderRadius: 8 }}
+          style={{ width: w(), height: w() * 1.5, borderRadius: 8 }}
         />
         <If when={props.badge}>
           {(b) => (

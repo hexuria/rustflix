@@ -60,7 +60,7 @@ import { Player } from "./screens/Player";
 import { ResolverHost } from "./screens/ResolverHost";
 import { NativePlayerDebug, runNativeTest } from "./screens/NativePlayerDebug";
 import { runResolveTest } from "./lib/resolver";
-import { focusSearchField, Search } from "./screens/Search";
+import { focusSearchField, runOpenSearchTest, Search } from "./screens/Search";
 import {
   Settings as SettingsScreen,
   SettingsPage,
@@ -729,6 +729,7 @@ void Promise.all([settle(loadKey), settle(loadLibrary), settle(loadDownloads)]).
   // Debug start route: `rustflix.opentitle` opens a title page
   // (screens/Title.tsx `runOpenTitleTest`).
   void runOpenTitleTest().catch(() => {});
+  void runOpenSearchTest().catch(() => {});
   // Spike: `rustflix.nativetest` plays a resolved stream in the app's own
   // player through the local proxy (screens/NativePlayerDebug.tsx; needs
   // `rustflix.nativeplayer` = "1"; removed after one run).

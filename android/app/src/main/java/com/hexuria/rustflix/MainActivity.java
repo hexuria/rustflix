@@ -88,6 +88,8 @@ public final class MainActivity extends Activity {
         downloads.register(nsh);
         // The app's own player (rustflix.video, Media3) and sys.webViews.
         NativeVideo.register(nsh);
+        // The system's own loading ring (rustflix.spinner).
+        NativeSpinner.register(nsh);
         WebViewTweaks.registerHost(nsh);
 
         nsh.loadAssetBundle("nsh");

@@ -15,6 +15,7 @@ import {
   episodeLabel,
   openCardMenu,
   PosterCard,
+  posterGrid,
   resumeRoute,
   Section,
   type CardTarget,
@@ -55,9 +56,10 @@ export function Library() {
   const watching = computed(() => continueWatchingByTitle());
   const items = computed(() => watchlist());
   const gridW = signal(0);
-  const cols = computed(() => Math.max(1, Math.floor((gridW() + 16) / (140 + 16))));
-  /** Cards fill their column (at least 140 pt). */
-  const cardW = computed(() => Math.max(140, Math.floor((gridW() - (cols() - 1) * 16) / cols())));
+  /** Three across on a phone, more on wider screens (lib/ui `posterGrid`). */
+  const grid = computed(() => posterGrid(gridW()));
+  const cols = () => grid().cols;
+  const cardW = () => grid().cardW;
   let scroll: ScrollRef | undefined;
   let lastTap = tabReselected();
   effect(() => {
@@ -148,15 +150,15 @@ export function Library() {
           </If>
           {/* A virtualized grid in the page (`viewport="parent"`): only the
               rows near the screen exist, however long the list grows.
-              Columns of 140 pt cards fit the width (16 pt apart). */}
+              The columns fill the width (posterGrid). */}
           <View onLayout={(e) => gridW.set(e.bounds.size.width)}>
             <If when={gridW() > 0 && items().length > 0}>
             <List
               viewport="parent"
               each={items()}
               numColumns={cols()}
-              estimatedItemSize={262}
-              contentStyle={{ rowGap: 16, columnGap: 16 }}
+              estimatedItemSize={Math.round(cardW() * 1.5) + 44}
+              contentStyle={{ rowGap: 16, columnGap: grid().gap }}
             >
               {(item: () => LibraryItem) => (
                 <PosterCard

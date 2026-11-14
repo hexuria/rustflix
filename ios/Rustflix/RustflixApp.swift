@@ -92,6 +92,8 @@ final class NshHostController: UIViewController {
         // the bundle mounts anything) and the stream proxy (`dl.stream.*`):
         // NativeVideo.swift, StreamProxy.swift.
         NativeVideoHost.register(appView)
+        // The system activity indicator (`rustflix.spinner`).
+        NativeSpinnerComponent.register(appView)
         do {
             try appView.loadBundle(at: url)
         } catch {

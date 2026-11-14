@@ -8414,15 +8414,29 @@ dependencies = [
 name = "rustflix"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "block2 0.6.2",
+ "dispatch2",
  "env_logger",
+ "gpui-fast-platform",
+ "libc",
  "log",
  "nsh-base",
  "nsh-bundler",
  "nsh-core",
+ "nsh-engine",
  "nsh-js",
  "nsh-platform-gpui",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "rolldown_std_utils",
+ "serde",
  "serde_json",
+ "ureq",
+ "url",
 ]
 
 [[package]]

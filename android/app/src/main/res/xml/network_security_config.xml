@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTPS everywhere, except the downloader's local playback server:
+     finished downloads play in the app's web view from
+     http://127.0.0.1:<port>/<random token>/<id>/player.html (src/dl/server.rs,
+     bound to loopback only). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

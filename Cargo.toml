@@ -1,6 +1,6 @@
 [package]
 name = "rustflix"
-description = "rustflix: a native streaming app — GPUI shell hosting an NSH (TSX) interface. Reverse-engineered from Streambert."
+description = "rustflix: a native streaming app — GPUI shell hosting an NSH (TSX) interface."
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0"
@@ -13,6 +13,38 @@ publish = false
 nsh-platform-gpui = { version = "0.4.0", default-features = false, features = ["js", "webview", "runtime-shaders"] }
 env_logger = "0.11"
 log = "0.4"
+# The `nsh/host` channel (`HostChannel`) behind the app's `cache.*` calls;
+# the same nsh-engine nsh-platform-gpui builds on.
+nsh-engine = { version = "0.4.0", default-features = false }
+serde_json = "1"
+# The built-in downloader (`src/dl`): HTTP with the same ureq (and its
+# default rustls + gzip features) nsh-engine already builds, URL
+# resolution, and the records/manifests as JSON. All already in the tree.
+ureq = "3.5.1"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+# The FPS monitor's window root (src/perf.rs): GPUI's application, the
+# same gpui-fast-platform nsh-platform-gpui builds on, and the channel that
+# wakes it (both already in the tree).
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.10", default-features = false }
+async-channel = "2"
+
+# `fs.space` (statvfs) for the download folder's volume.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# `cache.clear` of web/site data through the web views' WKWebsiteDataStore
+# (all already in the tree through wry).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSDate", "NSError", "NSFileManager", "NSSet", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebsiteDataRecord", "WKWebsiteDataStore"] }
+block2 = "0.6"
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
+# The native player spike (src/player): the video output's CVPixelBuffers,
+# painted by GPUI (both already in the tree through gpui-fast).
+objc2-core-foundation = { version = "0.3", default-features = false }
+objc2-core-video = { version = "0.3", default-features = false, features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer"] }
 
 # `build.rs` bundles and compiles `app/` as `nsh build` does.
 [build-dependencies]
@@ -29,3 +61,13 @@ rolldown_std_utils = "=1.2.13"
 opt-level = 3
 [profile.dev.package.taffy]
 opt-level = 3
+
+# `PERF=1 ./package-macos.sh`: release, plus line tables and the symbol
+# table, so the FPS monitor's spike stacks name file:line (`atos`). The
+# default release build keeps the symbol table too (Cargo strips only debug
+# info), so function names resolve there as well.
+[profile.perf]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+

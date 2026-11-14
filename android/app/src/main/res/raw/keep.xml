@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NSH's TabBar looks its icons up by name (getIdentifier): keep them if
+     resource shrinking is ever turned on. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@drawable/tab_*" />

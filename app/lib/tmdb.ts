@@ -76,11 +76,32 @@ export function imgUrl(path: string | null | undefined, size = "w500"): string {
   return path ? `${IMG}/${size}${path}` : "";
 }
 
+/** The user's own key ("" while the built-in one is in use). */
+const userKey = signal("");
+let keyLoaded = false;
+
 export async function loadKey(): Promise<string> {
-  if (apiKey()) return apiKey();
-  const saved = await Storage.getItem(KEY_STORAGE);
-  setKey(saved || BUNDLED_KEY);
+  if (keyLoaded || apiKey()) return apiKey();
+  const saved = (await Storage.getItem(KEY_STORAGE)) ?? "";
+  keyLoaded = true;
+  // An older build stored the built-in key as if the user had typed it:
+  // that is not the user's key, so it is never shown and is dropped.
+  const own = saved.trim() === BUNDLED_KEY ? "" : saved.trim();
+  if (saved && !own) Storage.removeItem(KEY_STORAGE).catch(() => {});
+  userKey.set(own);
+  setKey(own || BUNDLED_KEY);
   return apiKey();
+}
+
+/** The key the user saved themselves; "" when the built-in key is used
+ * (reactive). Never the built-in key. */
+export function savedKey(): string {
+  return userKey();
+}
+
+/** Whether this build ships a built-in key. */
+export function hasBundledKey(): boolean {
+  return BUNDLED_KEY.length > 0;
 }
 
 export function setKey(key: string) {
@@ -90,9 +111,14 @@ export function setKey(key: string) {
   bearer = k.startsWith("eyJ") || k.length > 60;
 }
 
+/** Saves the user's own key; "" removes it and goes back to the built-in
+ * key (none in a build without one: setup is needed again). */
 export async function saveKey(key: string) {
-  setKey(key);
-  if (key.trim()) await Storage.setItem(KEY_STORAGE, key.trim());
+  const k = key.trim() === BUNDLED_KEY ? "" : key.trim();
+  keyLoaded = true;
+  userKey.set(k);
+  setKey(k || BUNDLED_KEY);
+  if (k) await Storage.setItem(KEY_STORAGE, k);
   else await Storage.removeItem(KEY_STORAGE);
 }
 
@@ -128,7 +154,8 @@ export function clearCache() {
   cache.clear();
 }
 
-export const title = (m: Media) => m.title ?? m.name ?? m.original_title ?? m.original_name ?? "Untitled";
+/** A title's name; "" when TMDB has none (never a placeholder). */
+export const title = (m: Media) => m.title ?? m.name ?? m.original_title ?? m.original_name ?? "";
 export const year = (m: Media) => (m.release_date ?? m.first_air_date ?? "").slice(0, 4);
 export const isMovie = (m: Media) => (m.media_type ?? (m.release_date ? "movie" : "tv")) === "movie";
 

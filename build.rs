@@ -41,8 +41,9 @@ fn build(entry: &Path, out: &Path, release: bool) -> Result<(), String> {
         ui_sets: ui_sets.clone(),
     })
     .map_err(|e| e.plain)?;
+    let code = inject_keys(&bundle.code)?;
     let bytecode =
-        nsh_js::compile_bytecode_with(&bundle.code, release, &ui_sets).map_err(|e| e.message)?;
+        nsh_js::compile_bytecode_with(&code, release, &ui_sets).map_err(|e| e.message)?;
     let _ = fs::remove_dir_all(out);
     let write = |name: &str, bytes: &[u8]| {
         let path = out.join(name);
@@ -51,7 +52,7 @@ fn build(entry: &Path, out: &Path, release: bool) -> Result<(), String> {
         }
         fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
     };
-    write("bundle.js", bundle.code.as_bytes())?;
+    write("bundle.js", code.as_bytes())?;
     write(
         "bundle.js.map",
         bundle.source_map.as_deref().unwrap_or_default().as_bytes(),
@@ -97,4 +98,37 @@ fn build(entry: &Path, out: &Path, release: bool) -> Result<(), String> {
         write(&format!("assets/{path}"), &bytes)?;
     }
     Ok(())
+}
+
+/// Subtitle service keys are baked into the built bundle, never kept in
+/// the repository: `app/lib/subtitles.ts` holds two tokens, replaced here
+/// with the values of `WYZIE_API_KEY` / `SUBDL_API_KEY` (the packaging
+/// scripts read them from the Keychain). The value is XOR-scrambled and
+/// hex-encoded so it is not plain text in `bundle.js`; that is tidiness,
+/// not protection. Without the variables the tokens become empty and the
+/// app ships no keys.
+fn inject_keys(code: &str) -> Result<String, String> {
+    const PAD: &[u8] = b"rustflix-subtitle-keys";
+    let mut out = code.to_string();
+    for (token, var) in [
+        ("@@RUSTFLIX_WYZIE_KEY@@", "WYZIE_API_KEY"),
+        ("@@RUSTFLIX_SUBDL_KEY@@", "SUBDL_API_KEY"),
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+        let key = std::env::var(var).unwrap_or_default();
+        let key = key.trim();
+        if !key.is_empty() && !out.contains(token) {
+            return Err(format!(
+                "{var} is set but its slot `{token}` is not in the bundle \
+                 (did the minifier fold it away?)"
+            ));
+        }
+        let packed: String = key
+            .bytes()
+            .enumerate()
+            .map(|(i, b)| format!("{:02x}", b ^ PAD[i % PAD.len()]))
+            .collect();
+        out = out.replace(token, &packed);
+    }
+    Ok(out)
 }

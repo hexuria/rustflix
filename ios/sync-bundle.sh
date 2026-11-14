@@ -4,6 +4,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Subtitle service keys are baked into the bundle by build.rs. They live in
+# the macOS Keychain (`secret set WYZIE_API_KEY`, `secret set SUBDL_API_KEY`),
+# never in the repo; a build without them simply ships no keys.
+if command -v secret >/dev/null 2>&1; then
+  : "${WYZIE_API_KEY:=$(secret get WYZIE_API_KEY 2>/dev/null || true)}"
+  : "${SUBDL_API_KEY:=$(secret get SUBDL_API_KEY 2>/dev/null || true)}"
+  export WYZIE_API_KEY SUBDL_API_KEY
+fi
+
 cargo build "$@"
 
 # build.rs writes $OUT_DIR/app; OUT_DIR lives under the cargo target dir,

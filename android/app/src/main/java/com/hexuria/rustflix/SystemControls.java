@@ -84,7 +84,10 @@ final class SystemControls {
                 hideNav = hidden;
                 activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_HIDE_NAV, hidden).apply();
             }
-            activity.runOnUiThread(this::bars);
+            activity.runOnUiThread(() -> {
+                bars();
+                nsh.requestApplyInsets(); // the layout's insets follow the setting
+            });
             Map<String, Object> out = new HashMap<>();
             out.put("ok", true);
             out.put("buttons", buttonNavigation());
@@ -165,6 +168,15 @@ final class SystemControls {
                 : ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
         bars();
         backLeavesFullscreen(full);
+    }
+
+    /** The activity's window has focus (a launch, back from another app, a
+     * dialog closed): whatever put the navigation buttons back, they go
+     * again at once. */
+    void focusGained() {
+        if (Build.VERSION.SDK_INT < 30 || !hidesNavButtons() || (player && fullscreen)) return;
+        WindowInsetsController c = activity.getWindow().getInsetsController();
+        if (c != null) hideNavNow(c, 12);
     }
 
     /** Back in front, or a window came or went: the bars as they should be. */
@@ -258,6 +270,62 @@ final class SystemControls {
         return hideNav && buttonNavigation();
     }
 
+    /**
+     * The buttons go at once, with no animation. A plain {@code hide()} has
+     * the system slide them out, and that slide runs in this process: at a
+     * cold start, while the bundle loads, it stalled half way and then
+     * jumped. Taking the animation over and finishing it immediately skips
+     * it. Control only exists once the window has focus; until then
+     * ({@code onCancelled}) this asks again on the next frames, and falls
+     * back to the plain request.
+     */
+    private void hideNavNow(WindowInsetsController c, int tries) {
+        if (Build.VERSION.SDK_INT < 30) return;
+        c.controlWindowInsetsAnimation(WindowInsets.Type.navigationBars(), -1, null, null,
+                new android.view.WindowInsetsAnimationControlListener() {
+                    @Override
+                    public void onReady(android.view.WindowInsetsAnimationController ctl, int types) {
+                        ctl.finish(false);
+                    }
+
+                    @Override
+                    public void onFinished(android.view.WindowInsetsAnimationController ctl) {}
+
+                    @Override
+                    public void onCancelled(android.view.WindowInsetsAnimationController ctl) {
+                        if (!hidesNavButtons() || (player && fullscreen)) return;
+                        if (tries > 0) {
+                            android.view.Choreographer.getInstance().postFrameCallback(t -> hideNavNow(c, tries - 1));
+                        } else {
+                            c.hide(WindowInsets.Type.navigationBars());
+                        }
+                    }
+                });
+    }
+
+    /**
+     * The insets the app is laid out with: without the navigation bar's
+     * while it is kept away. Left in, the first layout (before the window
+     * has focus and the buttons go) keeps room for the bar and the next
+     * one gives it back — the whole page moving by the bar's height a
+     * moment after it shows. The tab bar sits at the bottom from the first
+     * frame instead.
+     */
+    @SuppressWarnings("deprecation")
+    WindowInsets layoutInsets(WindowInsets insets) {
+        if (insets == null || !hidesNavButtons() || (player && fullscreen)) return insets;
+        if (Build.VERSION.SDK_INT >= 30) {
+            return new WindowInsets.Builder(insets)
+                    .setInsets(WindowInsets.Type.navigationBars(), android.graphics.Insets.NONE)
+                    .build();
+        }
+        // Android 8–10: the bottom inset is the bar's unless a keyboard is up.
+        int bottom = insets.getSystemWindowInsetBottom();
+        if (bottom != insets.getStableInsetBottom()) return insets;
+        return insets.replaceSystemWindowInsets(
+                insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), 0);
+    }
+
     @SuppressWarnings("deprecation")
     private void bars(View root) {
         // The player's own window (NSH's modal Dialog) is transparent and
@@ -290,7 +358,15 @@ final class SystemControls {
                 // moment, over the app.
                 c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
                 c.show(WindowInsets.Type.statusBars());
-                c.hide(WindowInsets.Type.navigationBars());
+                if (root == activity.getWindow().getDecorView()) {
+                    // The activity's window: see hideNavNow (no animation).
+                    // Without focus yet, `focusGained` does it.
+                    if (root.hasWindowFocus()) hideNavNow(c, 12);
+                } else {
+                    // A dialog over it: the buttons are already away, so
+                    // the plain request changes nothing on screen.
+                    c.hide(WindowInsets.Type.navigationBars());
+                }
             } else {
                 c.show(WindowInsets.Type.systemBars());
             }

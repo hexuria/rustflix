@@ -50,7 +50,19 @@ public final class MainActivity extends Activity {
             if (nsh != null) nsh.handleBack();
         });
 
-        nsh = new NshView(this);
+        // Laid out without the navigation bar's inset while the buttons are
+        // kept away (SystemControls.layoutInsets), from the first frame.
+        nsh = new NshView(this) {
+            @Override
+            public android.view.WindowInsets getRootWindowInsets() {
+                return sys.layoutInsets(super.getRootWindowInsets());
+            }
+
+            @Override
+            public android.view.WindowInsets onApplyWindowInsets(android.view.WindowInsets insets) {
+                return super.onApplyWindowInsets(sys.layoutInsets(insets));
+            }
+        };
         nsh.setBackgroundColor(0xff000000);
         nsh.setErrorListener(message -> Log.e(TAG, "nsh: " + message));
         // An app on its own, not a module in another app: room to spare on
@@ -125,7 +137,10 @@ public final class MainActivity extends Activity {
         // A window came or went (NSH shows modals, the player among them,
         // in Dialogs): watch its web views too.
         WebViewTweaks.rescan();
-        if (sys != null) sys.reapply();
+        if (sys != null) {
+            sys.reapply();
+            if (hasFocus) sys.focusGained();
+        }
     }
 
     @Override

@@ -14,6 +14,14 @@ export interface Source {
   supportsAnime?: boolean;
   /** Some embeds key on IMDb rather than the TMDB id. */
   idType?: "imdb";
+  /** "native": the stream resolves in the hidden page and plays in the
+   * app's own player; "web": its embed page is the player. The seed —
+   * each device learns more (lib/playback/caps.ts `sourcePlayback`). */
+  playback: "native" | "web";
+  /** Never in the app's player, whatever was learned or forced (KinoHub:
+   * its embed takes a Kinopoisk id, not the TMDB id the app has, so a
+   * resolve would return the wrong film). */
+  noNative?: boolean;
   colorParam: string | null;
   colorWithHash?: boolean;
   langParam: string | null;
@@ -26,6 +34,7 @@ export interface Source {
 export const PLAYER_SOURCES: Source[] = [
   {
     id: "vidsrc",
+    playback: "native",
     label: "VidSrc",
     tag: null,
     note: null,
@@ -37,6 +46,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "vidfast",
+    playback: "native",
     label: "Vidfast",
     tag: null,
     note: null,
@@ -48,6 +58,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "vidlove",
+    playback: "web",
     label: "Vidlove",
     tag: null,
     note: null,
@@ -66,6 +77,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "aether",
+    playback: "native",
     label: "Aether",
     tag: null,
     note: "Multi Lang",
@@ -77,6 +89,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "vidrift",
+    playback: "native",
     label: "Vidrift",
     tag: null,
     note: "Multi Lang, Anime",
@@ -88,6 +101,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "vidnest",
+    playback: "native",
     label: "Vidnest",
     tag: null,
     note: "Anime",
@@ -100,6 +114,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "devideosrc",
+    playback: "native",
     label: "DeVideoSrc",
     tag: null,
     note: "DE",
@@ -113,6 +128,7 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "frembed",
+    playback: "web",
     label: "Frembed",
     tag: null,
     note: "FR",
@@ -124,6 +140,8 @@ export const PLAYER_SOURCES: Source[] = [
   },
   {
     id: "kinohub",
+    playback: "web",
+    noNative: true,
     label: "KinoHub",
     tag: null,
     note: "RU",
@@ -197,6 +215,12 @@ export function sourcesFor(type: MediaType): Source[] {
   return PLAYER_SOURCES.filter((s) => {
     if (type === "anime") return !!s.animeUrl || s.id === "vidnest";
     if (type === "tv") return !!s.tvUrl && !s.movieOnly;
-    return !s.movieOnly || s.id !== "kinohub" ? true : false;
+    // Every source has a movie URL, movie-only ones included.
+    return true;
   });
+}
+
+/** Whether source `id` can play titles of `type`. */
+export function sourceSupports(id: string, type: MediaType): boolean {
+  return sourcesFor(type).some((s) => s.id === id);
 }

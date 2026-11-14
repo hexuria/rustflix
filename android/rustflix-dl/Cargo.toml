@@ -1,0 +1,37 @@
+[package]
+name = "rustflix-dl"
+description = "rustflix's downloader (src/dl) as an Android library: JNI over the same dl.* JSON API the desktop shell registers."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+publish = false
+
+# Its own workspace: never a member of the desktop crate's, so the desktop
+# binary, its lockfile and its tests are untouched.
+[workspace]
+
+[lib]
+name = "rustflix_dl"
+# cdylib: librustflix_dl.so for the APK; rlib: `cargo test` on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# src/dl imports `nsh_engine::{HostCall, HostChannel}` (for its desktop
+# `register`); this tiny stand-in satisfies that without the NSH engine.
+nsh_engine = { package = "rustflix-dl-hostshim", path = "hostshim" }
+ureq = "3.5.1"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+libc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+android_logger = "0.14"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "unwind"

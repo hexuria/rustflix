@@ -4,17 +4,35 @@
   "version": "0.1.0",
   "build": 1,
   "appearance": "dark",
+  "theme": {
+    "cssVars": {
+      "dark": {
+        "primary": "#e50914",
+        "primary-foreground": "#ffffff",
+        "ring": "#e50914"
+      }
+    }
+  },
   "capabilities": {
     "network": {
       "hosts": [
         "api.themoviedb.org",
         "*.themoviedb.org",
         "*.tmdb.org",
-        "api.anilist.co",
         "graphql.anilist.co",
+        "s4.anilist.co",
+        "api.ani.zip",
+        "artworks.thetvdb.com",
+        "img1.ak.crunchyroll.com",
         "api.aniskip.com",
         "hianime.at",
-        "*.hianime.at"
+        "*.hianime.at",
+        "embed.vidrift.net",
+        "sub.wyzie.io",
+        "subs.wyzie.io",
+        "subs.wyzie.ru",
+        "api.subdl.com",
+        "dl.subdl.com"
       ]
     },
     "webview": {
@@ -23,7 +41,7 @@
     "openUrl": {
       "schemes": ["https"]
     },
-    "host": ["dl.*"],
+    "host": ["dl.*", "sys.*", "cache.*", "fs.*", "perf.*"],
     "process": {
       "execute": ["/bin/sh", "cmd.exe", "python3", "/usr/bin/python3", "python"]
     }

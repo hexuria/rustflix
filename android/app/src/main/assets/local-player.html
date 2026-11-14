@@ -1,0 +1,145 @@
+<!doctype html>
+<meta charset=utf-8><meta name=viewport content="width=device-width">
+<!--
+  Android's page for a finished download (served in place of the
+  downloader's own player.html, which is just <video src>: WebView's
+  built-in HLS cannot parse fragmented-MP4 playlists, DEMUXER_ERROR).
+  fMP4 HLS plays through Media Source Extensions: the playlists and
+  segments come from the same localhost server, the init segment
+  (EXT-X-MAP) and then the media segments are appended in order, about a
+  minute ahead of the playhead, from wherever a seek lands. Separate audio
+  renditions get their own SourceBuffer. Anything else (an mp4, an
+  MPEG-TS playlist) plays natively. The app's page bridge drives the
+  <video> as on every other page.
+-->
+<style>html,body{margin:0;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain}</style>
+<video playsinline webkit-playsinline preload="metadata"></video>
+<script>
+(function () {
+  var v = document.querySelector('video');
+  var f = new URLSearchParams(location.search).get('f') || '';
+  function native() { v.src = f; v.play().catch(function () {}); }
+  if (!/\.m3u8$/i.test(f) || !window.MediaSource) return native();
+  var abs = function (u, b) { return new URL(u, b).href; };
+  var get = function (u, bin) {
+    return fetch(u).then(function (r) {
+      if (!r.ok) throw new Error(u + ': ' + r.status);
+      return bin ? r.arrayBuffer() : r.text();
+    });
+  };
+  var attr = function (line, name) {
+    var m = new RegExp(name + '=("([^"]*)"|[^,]*)').exec(line);
+    return m ? (m[2] !== undefined ? m[2] : m[1]) : null;
+  };
+  function media(url) {
+    return get(url).then(function (t) {
+      var lines = t.split(/\r?\n/), map = null, segs = [], dur = 0, start = 0;
+      for (var i = 0; i < lines.length; i++) {
+        var l = lines[i].trim();
+        if (l.indexOf('#EXT-X-MAP') === 0) map = abs(attr(l, 'URI'), url);
+        else if (l.indexOf('#EXTINF:') === 0) dur = parseFloat(l.slice(8));
+        else if (l && l[0] !== '#') { segs.push({ url: abs(l, url), start: start, dur: dur }); start += dur; }
+      }
+      return { map: map, segs: segs, total: start };
+    });
+  }
+  var base = abs(f, location.href);
+  get(base).then(function (master) {
+    var vurl = base, aurl = null, codecs = null;
+    if (/#EXT-X-STREAM-INF/.test(master)) {
+      var lines = master.split(/\r?\n/), best = -1, group = null;
+      for (var i = 0; i < lines.length; i++) {
+        var l = lines[i].trim();
+        if (l.indexOf('#EXT-X-STREAM-INF') !== 0) continue;
+        var bw = parseInt(attr(l, 'BANDWIDTH') || '0', 10), next = (lines[i + 1] || '').trim();
+        if (next && bw > best) { best = bw; vurl = abs(next, base); codecs = attr(l, 'CODECS'); group = attr(l, 'AUDIO'); }
+      }
+      for (var j = 0; group && j < lines.length; j++) {
+        var m = lines[j].trim();
+        if (m.indexOf('#EXT-X-MEDIA') === 0 && attr(m, 'TYPE') === 'AUDIO' && attr(m, 'GROUP-ID') === group && attr(m, 'URI')) {
+          aurl = abs(attr(m, 'URI'), base);
+          if (attr(m, 'DEFAULT') === 'YES') break;
+        }
+      }
+    }
+    return Promise.all([media(vurl), aurl ? media(aurl) : null]).then(function (pl) {
+      if (!pl[0].map) return native();
+      var all = (codecs || 'avc1.640028,mp4a.40.2').split(',').map(function (c) { return c.trim(); });
+      var isAudio = function (c) { return /^(mp4a|ac-3|ec-3|opus|flac)/.test(c); };
+      var tracks = [];
+      if (pl[1] && pl[1].map) {
+        tracks.push({ pl: pl[0], type: 'video/mp4; codecs="' + all.filter(function (c) { return !isAudio(c); }).join(',') + '"' });
+        tracks.push({ pl: pl[1], type: 'audio/mp4; codecs="' + (all.filter(isAudio)[0] || 'mp4a.40.2') + '"' });
+      } else {
+        tracks.push({ pl: pl[0], type: 'video/mp4; codecs="' + all.join(',') + '"' });
+      }
+      for (var k = 0; k < tracks.length; k++) if (!MediaSource.isTypeSupported(tracks[k].type)) return native();
+      var ms = new MediaSource();
+      v.src = URL.createObjectURL(ms);
+      ms.addEventListener('sourceopen', function () {
+        ms.duration = pl[0].total;
+        tracks.forEach(function (t) { t.sb = ms.addSourceBuffer(t.type); run(t); });
+        v.play().catch(function () {});
+      }, { once: true });
+      var append = function (sb, data) {
+        return new Promise(function (ok, bad) {
+          var done = function () { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); ok(); };
+          var fail = function () { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); bad(new Error('append')); };
+          sb.addEventListener('updateend', done); sb.addEventListener('error', fail);
+          sb.appendBuffer(data);
+        });
+      };
+      var idle = function (ms2) { return new Promise(function (r) { setTimeout(r, ms2); }); };
+      var ahead = function (sb) {
+        var b = sb.buffered, t = v.currentTime;
+        for (var i = 0; i < b.length; i++) if (b.start(i) <= t + 0.5 && b.end(i) > t) return b.end(i) - t;
+        return 0;
+      };
+      var indexAt = function (segs, t) {
+        for (var i = 0; i < segs.length; i++) if (segs[i].start + segs[i].dur > t) return i;
+        return segs.length;
+      };
+      function run(t) {
+        t.gen = (t.gen || 0) + 1;
+        var gen = t.gen, segs = t.pl.segs, i = indexAt(segs, v.currentTime);
+        (function step(first) {
+          if (gen !== t.gen) return;
+          var work = first ? get(t.pl.map, true).then(function (d) { return append(t.sb, d); }) : Promise.resolve();
+          work.then(function () {
+            if (gen !== t.gen) return;
+            if (i >= segs.length) {
+              t.ended = true;
+              if (tracks.every(function (x) { return x.ended; }) && ms.readyState === 'open') try { ms.endOfStream(); } catch (e) {}
+              return;
+            }
+            if (ahead(t.sb) > 60) return idle(1000).then(function () { step(false); });
+            return get(segs[i].url, true).then(function (d) {
+              if (gen !== t.gen) return;
+              return append(t.sb, d).then(function () {
+                i++;
+                // Keep memory bounded: drop what is well behind.
+                var trim = v.currentTime > 90 && t.sb.buffered.length && t.sb.buffered.start(0) < v.currentTime - 75
+                  ? new Promise(function (ok) {
+                      var done = function () { t.sb.removeEventListener('updateend', done); ok(); };
+                      t.sb.addEventListener('updateend', done);
+                      try { t.sb.remove(0, v.currentTime - 60); } catch (e) { done(); }
+                    })
+                  : Promise.resolve();
+                return trim.then(function () { step(false); });
+              });
+            });
+          }).catch(function () { if (gen === t.gen) idle(1000).then(function () { step(false); }); });
+        })(true);
+      }
+      v.addEventListener('seeking', function () {
+        tracks.forEach(function (t) {
+          if (!t.sb || ahead(t.sb) > 0) return;
+          t.ended = false;
+          var go = function () { if (t.sb.updating) return setTimeout(go, 50); try { t.sb.abort(); } catch (e) {} run(t); };
+          go();
+        });
+      });
+    });
+  }).catch(native);
+})();
+</script>

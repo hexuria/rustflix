@@ -4,21 +4,34 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-cargo build --release
+# Subtitle service keys are baked into the bundle by build.rs. They live in
+# the macOS Keychain (`secret set WYZIE_API_KEY`, `secret set SUBDL_API_KEY`),
+# never in the repo; a build without them simply ships no keys.
+if command -v secret >/dev/null 2>&1; then
+  : "${WYZIE_API_KEY:=$(secret get WYZIE_API_KEY 2>/dev/null || true)}"
+  : "${SUBDL_API_KEY:=$(secret get SUBDL_API_KEY 2>/dev/null || true)}"
+  export WYZIE_API_KEY SUBDL_API_KEY
+fi
+
+# PERF=1: the `perf` profile (release, plus line tables and the symbol
+# table kept) so the FPS monitor's spike stacks symbolicate to file:line.
+PROFILE=release
+if [ "${PERF:-0}" = "1" ]; then PROFILE=perf; fi
+cargo build --profile "$PROFILE"
 
 # build.rs writes $OUT_DIR/app; find it under the cargo target dir.
 OUT=""
 for base in target "$HOME"/.cargo/targets/rustflix-*; do
-  cand=$(find "$base/release" -type d -path "*rustflix-*/out/app" 2>/dev/null | head -1)
+  cand=$(find "$base/$PROFILE" -type d -path "*rustflix-*/out/app" 2>/dev/null | head -1)
   if [ -n "$cand" ] && [ -f "$cand/bundle.nshc" ]; then OUT="$cand"; break; fi
 done
 [ -n "$OUT" ] || { echo "bundle.nshc not found" >&2; exit 1; }
 
 BIN=""
-for base in target/release "$HOME"/.cargo/targets/rustflix-*/release; do
+for base in target/$PROFILE "$HOME"/.cargo/targets/rustflix-*/$PROFILE; do
   [ -f "$base/rustflix" ] && BIN="$base/rustflix" && break
 done
-[ -n "$BIN" ] || BIN=$(find target/release "$HOME"/.cargo/targets/rustflix-*/release -maxdepth 1 -name rustflix -type f 2>/dev/null | head -1)
+[ -n "$BIN" ] || BIN=$(find target/$PROFILE "$HOME"/.cargo/targets/rustflix-*/$PROFILE -maxdepth 1 -name rustflix -type f 2>/dev/null | head -1)
 [ -n "$BIN" ] || { echo "release binary not found" >&2; exit 1; }
 
 DEST="${1:-$HOME/Applications}/rustflix.app"
@@ -49,6 +62,7 @@ cat > "$DEST/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict>
 </plist>
 PLIST

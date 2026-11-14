@@ -3,7 +3,7 @@
 // small drawing. The two-finger triple tap (the FPS monitor) is listed only
 // while Diagnostics are unlocked; it works either way.
 
-import { Image, platform, Text, View } from "nsh";
+import { Image, Text, View } from "nsh";
 import { icon } from "../PlayerControls";
 import { devMode } from "./state";
 
@@ -32,7 +32,7 @@ const GESTURES: Gesture[] = [
   { glyph: "twoFinger", what: "Two-finger triple tap", does: "FPS monitor", dev: true },
   {
     glyph: "swipe",
-    what: platform.os === "android" ? "Back gesture" : "Swipe from the left edge",
+    what: "Swipe from the left edge",
     does: "Go back",
   },
 ];

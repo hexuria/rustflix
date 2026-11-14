@@ -14,4 +14,5 @@ export const settingsCtx = computed<Ctx>(() => ({
   fps: fpsMonitorAvailable(),
   devmode: devMode(),
   keyboard: platform.desktop || keyboardAttached(),
+  android: platform.os === "android",
 }));

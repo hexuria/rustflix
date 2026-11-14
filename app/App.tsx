@@ -6,7 +6,7 @@ import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { createNavStack, Dialog, NavPage, NavStack, Toast, ToastManager, ToastStack } from "nsh/base";
 import { BackHandler, TabBar } from "nsh/mobile";
 import { hasKey, loadKey } from "./lib/tmdb";
-import { setPlayerWindow } from "./lib/system";
+import { setNavButtonsHidden, setPlayerWindow } from "./lib/system";
 import {
   canGoBack,
   canGoForward,
@@ -565,6 +565,8 @@ function MobileShell() {
   // native overlay takes them.
   if (platform.os === "android") {
     effect(() => setPlayerWindow(isPlayer(), playerPhase() === "blind"));
+    // The three-button bar stays out of the app while the setting is on.
+    effect(() => setNavButtonsHidden(settings().hideNavButtons));
   }
   return (
     <View class="flex-1 flex-col bg-background">

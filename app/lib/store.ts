@@ -82,6 +82,11 @@ export interface Settings {
    * animations (also on when the system asks for less motion:
    * `motionReduced()`). */
   reduceMotion: boolean;
+  /** Android with the three-button bar: keep the system's navigation
+   * buttons (back, home, recents) out of the app; a swipe up from the
+   * bottom edge shows them for a moment. Nothing changes with gesture
+   * navigation. */
+  hideNavButtons: boolean;
 }
 
 const WATCHLIST_KEY = "rustflix.watchlist.v1";
@@ -113,6 +118,7 @@ export const settings = signal<Settings>({
   preferredAudio: "",
   confirmDeleteDownload: true,
   reduceMotion: false,
+  hideNavButtons: true,
 });
 export const libraryReady = signal(false);
 
@@ -206,6 +212,7 @@ export function migrateSettings(defaults: Settings, saved: Partial<Settings>): S
     out.confirmDeleteDownload = defaults.confirmDeleteDownload;
   }
   if (typeof out.reduceMotion !== "boolean") out.reduceMotion = defaults.reduceMotion;
+  if (typeof out.hideNavButtons !== "boolean") out.hideNavButtons = defaults.hideNavButtons;
   // The vid-dl path of older builds: ignored (downloads are built in).
   delete out.downloaderPath;
   return out;

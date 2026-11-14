@@ -28,7 +28,7 @@ import { setDevMode } from "./state";
 // --- Types ------------------------------------------------------------------------
 
 export type Platform = "desktop" | "phone" | "tablet";
-export type Need = "download" | "cache" | "fps" | "devmode" | "keyboard";
+export type Need = "download" | "cache" | "fps" | "devmode" | "keyboard" | "android";
 
 /** The device a list is made for. */
 export interface Ctx {
@@ -43,6 +43,8 @@ export interface Ctx {
   devmode: boolean;
   /** A keyboard: always on the desktop; an iPad with one attached. */
   keyboard: boolean;
+  /** An Android device (its system navigation bar can be kept away). */
+  android: boolean;
 }
 
 export interface Option {
@@ -263,6 +265,25 @@ export const CATEGORIES: CategoryDef[] = [
               kind: "switch",
               get: () => settings().reduceMotion,
               set: (on) => void saveSettings({ reduceMotion: on }),
+            },
+          },
+        ],
+      },
+      {
+        id: "general.android",
+        title: "Screen",
+        needs: ["android"],
+        rows: [
+          {
+            id: "general.hideNavButtons",
+            label: "Hide Android's navigation buttons",
+            description:
+              "Keeps the back, home and recents buttons off the screen. Swipe up from the bottom edge to show them. Does nothing with gesture navigation.",
+            keywords: ["navigation bar", "buttons", "back", "home", "recents", "immersive", "full screen", "bottom bar"],
+            control: {
+              kind: "switch",
+              get: () => settings().hideNavButtons,
+              set: (on) => void saveSettings({ hideNavButtons: on }),
             },
           },
         ],

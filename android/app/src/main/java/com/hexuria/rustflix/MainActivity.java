@@ -32,11 +32,23 @@ public final class MainActivity extends Activity {
     private PerfMonitor perf;
     private Downloads downloads;
     private Pip pip;
+    private EdgeBack edgeBack;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         edgeToEdge();
+        // Before any view exists: the navigation buttons are asked away
+        // ahead of the window's first frame, so they do not show and then
+        // slide out.
+        sys = new SystemControls(this);
+        sys.reapply();
+        // Swipe from the left edge to go back (phones with the button bar).
+        // At a tab's first page there is nothing to go back to: it does
+        // nothing there, it never leaves the app.
+        edgeBack = new EdgeBack(getWindow().getDecorView(), sys::buttonNavigation, () -> {
+            if (nsh != null) nsh.handleBack();
+        });
 
         nsh = new NshView(this);
         nsh.setBackgroundColor(0xff000000);
@@ -55,7 +67,6 @@ public final class MainActivity extends Activity {
 
         pip = new Pip(this);
         pip.register(nsh);
-        sys = new SystemControls(this);
         sys.pip = pip;
         sys.register(nsh);
         new CacheControls(this).register(nsh);
@@ -123,11 +134,12 @@ public final class MainActivity extends Activity {
         if (sys != null) sys.reapply();
     }
 
-    /** Every touch passes through untouched; the FPS monitor only watches
-     * for its two-finger triple tap. */
+    /** The FPS monitor only watches (its two-finger triple tap); the edge
+     * swipe back takes a touch over once it is clearly that gesture. */
     @Override
     public boolean dispatchTouchEvent(android.view.MotionEvent e) {
         if (perf != null) perf.observe(e);
+        if (edgeBack != null && edgeBack.onTouch(e, super::dispatchTouchEvent)) return true;
         return super.dispatchTouchEvent(e);
     }
 

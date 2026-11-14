@@ -1103,12 +1103,18 @@ export function Player() {
               <SeekIcon dir={1} size={24} />
             </View>
             <View class={`flex-1 flex-row items-center gap-2 ${blind() ? "opacity-35" : ""}`}>
-              <Text class="w-12 text-right text-[11px] font-medium text-zinc-300">
+              <Text
+                class="text-right text-[11px] font-medium text-zinc-300"
+                style={{ minWidth: 48, flexShrink: 0, numberOfLines: 1 }}
+              >
                 {fmtTime(position())}
               </Text>
               <SeekBar desktop disabled={blind()} />
-              <Text class="w-12 text-[11px] font-medium text-zinc-300">
-                {`−${fmtTime(Math.max(0, duration() - position()))}`}
+              <Text
+                class="text-[11px] font-medium text-zinc-300"
+                style={{ minWidth: 48, flexShrink: 0, numberOfLines: 1 }}
+              >
+                {fmtTime(Math.max(0, duration() - position()))}
               </Text>
             </View>
             <BarBtn

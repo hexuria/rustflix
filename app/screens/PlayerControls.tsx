@@ -116,6 +116,14 @@ export function fmtTime(sec: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
+/** The least width (12 px text) the time-left label ("h:mm:ss", no sign)
+ * of a video this long keeps: wide enough for its longest reading, so the
+ * seek bar beside it does not change length as the digits tick. The label
+ * itself never wraps or shrinks; the bar gives way. */
+export function remainingWidth(durationSec: number): number {
+  return Math.ceil(fmtTime(durationSec).length * 7.4) + 2;
+}
+
 /** "1×", "1.25×". */
 export function rateLabel(rate: number): string {
   return `${Math.round(rate * 100) / 100}×`;
@@ -1143,8 +1151,11 @@ export function PhoneControls() {
     >
       <View class="flex-row items-center gap-2" style={{ pointerEvents: "box-none" }}>
         <TouchSeekBar onActive={noteSeekDrag} />
-        <Text class="w-14 text-right text-xs font-medium text-white">
-          {`−${fmtTime(Math.max(0, duration() - position()))}`}
+        <Text
+          class="text-right text-xs font-medium text-white"
+          style={{ flexShrink: 0, numberOfLines: 1, minWidth: remainingWidth(duration()) }}
+        >
+          {fmtTime(Math.max(0, duration() - position()))}
         </Text>
       </View>
       <View class="-mx-2 flex-row items-center gap-3" style={{ pointerEvents: "box-none" }}>
@@ -1920,8 +1931,8 @@ export function DesktopControls(props: { inert?: boolean; spinning?: boolean }) 
               }}
               bubble={(f) => fmtTime(f * dur())}
             />
-            <Text style={{ fontSize: 12, fontWeight: "500", color: "#e4e4e7", minWidth: 56, textAlign: "right", textShadow: "0 1px 3px rgba(0,0,0,0.6)" }}>
-              {dur() > 0 && !inert ? `−${fmtTime(Math.max(0, dur() - position()))}` : ""}
+            <Text style={{ fontSize: 12, fontWeight: "500", color: "#e4e4e7", minWidth: Math.max(56, remainingWidth(dur())), flexShrink: 0, numberOfLines: 1, textAlign: "right", textShadow: "0 1px 3px rgba(0,0,0,0.6)" }}>
+              {dur() > 0 && !inert ? fmtTime(Math.max(0, dur() - position())) : ""}
             </Text>
           </View>
           <View class="flex-row items-center" style={{ gap: 4, marginTop: 6, pointerEvents: "box-none" }}>

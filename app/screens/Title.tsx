@@ -80,6 +80,12 @@ const desktop = platform.desktop;
 
 /** The page's one horizontal gutter. */
 const GUTTER = desktop ? 32 : 16;
+/** The episode list reaches both screen edges (a row's pressed state is
+ * full-bleed) through ONE box with negative margins around all the rows.
+ * Not a negative margin on each row: on iOS that made a long list (One
+ * Piece's hundred rows) a gutter wider than the screen, and the page could
+ * be dragged sideways. */
+const ROWS_BLEED = { marginLeft: -GUTTER, marginRight: -GUTTER };
 /** The phone header's width over its height. */
 const HEADER_RATIO = 4 / 3;
 /** The desktop header's height. */
@@ -259,7 +265,8 @@ function tvRowEp(ep: Episode): RowEp {
 
 /** One episode: still (16:9) with its watch progress, "n. Title" on up to
  * two lines, date · runtime, three lines of description, the download
- * control at the right. Full-bleed pressed state; contents on the gutter.
+ * control at the right. Full-bleed pressed state; contents on the gutter
+ * (the row pads itself: it sits in an `EpisodeRows`, which is full-bleed).
  * TV and anime alike. `note`: a short extra line ("Dub downloaded"). */
 function EpisodeRow(props: {
   ep: RowEp;
@@ -284,8 +291,6 @@ function EpisodeRow(props: {
       onPress={props.onPress}
       class="cursor-pointer flex-row items-center gap-3 hover:bg-white/5 active:bg-white/10"
       style={{
-        marginLeft: -GUTTER,
-        marginRight: -GUTTER,
         paddingLeft: GUTTER,
         paddingRight: GUTTER,
         paddingTop: 10,
@@ -349,7 +354,10 @@ function EpisodeSkeletons() {
   return (
     <Each of={[0, 1, 2]} key="index">
       {() => (
-        <View class="flex-row gap-3" style={{ paddingTop: 10, paddingBottom: 10 }}>
+        <View
+          class="flex-row gap-3"
+          style={{ paddingLeft: GUTTER, paddingRight: GUTTER, paddingTop: 10, paddingBottom: 10 }}
+        >
           <Skeleton width={thumbW} height={thumbH} radius={6} />
           <View class="flex-1 gap-2 pt-1">
             <Skeleton width="70%" height={14} radius={4} />
@@ -1223,7 +1231,7 @@ export function Title(props: { route: TitleRoute }) {
               </Text>
             </If>
             <If when={seasonError()}>{(e) => <ErrorLine message={e()} onRetry={retrySeason} />}</If>
-            <View>
+            <View style={ROWS_BLEED}>
               <If when={seasonLoading() && episodes().length === 0}>
                 <EpisodeSkeletons />
               </If>
@@ -1278,7 +1286,7 @@ export function Title(props: { route: TitleRoute }) {
                 </View>
               </Scroll>
             </If>
-            <View>
+            <View style={ROWS_BLEED}>
               <Each of={animeRows().slice(0, epShown())} key={(r: RowEp) => r.n}>
                 {(ep) => (
                   <EpisodeRow

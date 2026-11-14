@@ -49,6 +49,8 @@ public final class MainActivity extends Activity {
 
         // Web views NSH creates get the settings the player needs.
         WebViewTweaks.watch(nsh);
+        // Icon-only bottom tabs (the labels were being cut off).
+        TabBarTweaks.watch(nsh);
         WebGuard.register(nsh);
 
         pip = new Pip(this);

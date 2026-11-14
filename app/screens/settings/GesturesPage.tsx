@@ -39,14 +39,20 @@ const GESTURES: Gesture[] = [
 
 function GestureRow(props: { g: Gesture }) {
   return (
+    // The gesture's name over what it does, both free to wrap. (Side by
+    // side, the name had only the width the description left over: on a
+    // narrow phone that was a few points, and it wrapped a letter a line.)
     <View class="min-h-12 flex-row items-center gap-3 px-4 py-2.5">
-      <View class="h-8 w-8 items-center justify-center rounded-lg bg-white/10">
+      <View
+        class="h-8 w-8 items-center justify-center rounded-lg bg-white/10"
+        style={{ flexShrink: 0 }}
+      >
         <Image src={icon(GLYPH[props.g.glyph], 20)} style={{ width: 20, height: 20 }} />
       </View>
-      <Text class="flex-1 text-sm font-medium text-foreground">{props.g.what}</Text>
-      <Text class="text-sm text-muted-foreground" style={{ textAlign: "right", flexShrink: 1 }}>
-        {props.g.does}
-      </Text>
+      <View class="flex-1 gap-0.5" style={{ minWidth: 0 }}>
+        <Text class="text-sm font-medium text-foreground">{props.g.what}</Text>
+        <Text class="text-xs text-muted-foreground">{props.g.does}</Text>
+      </View>
     </View>
   );
 }

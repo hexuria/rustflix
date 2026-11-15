@@ -19,11 +19,21 @@ mod player;
 mod stream;
 
 /// The bundle to run: an explicit argument (a `.nshc` or its directory),
-/// else `Contents/Resources/nsh` when running inside `rustflix.app`, else
+/// else `Contents/Resources/nsh` when running inside `rustflix.app` (`nsh/`
+/// beside the executable on Windows and Linux), else
 /// `app/` as `build.rs` built it.
 fn bundle_path() -> PathBuf {
     if let Some(arg) = std::env::args_os().skip(1).map(PathBuf::from).next() {
         return if arg.is_dir() { arg.join("bundle.nshc") } else { arg };
+    }
+    // Windows and Linux: the bundle folder `nsh` beside the executable.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(bundled) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("nsh").join("bundle.nshc")))
+        && bundled.is_file()
+    {
+        return bundled;
     }
     if let Ok(exe) = std::env::current_exe() {
         // <App>.app/Contents/MacOS/rustflix -> <App>.app/Contents/Resources/nsh

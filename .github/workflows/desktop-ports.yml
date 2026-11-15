@@ -1,0 +1,136 @@
+# Spike: Windows and Linux builds of the desktop app. Compile check only;
+# nothing here is released (release.yml is untouched).
+name: Desktop ports
+
+on:
+  push:
+    branches: [spike/desktop-ports]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: linux
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-dev pkg-config libfontconfig-dev libfreetype-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libzstd-dev libvulkan1 libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Collect the runnable folder
+        shell: bash
+        run: |
+          # build.rs writes $OUT_DIR/app; the newest bundle.nshc is this build's.
+          nshc=$(find target/release/build -path '*/out/app/bundle.nshc' | xargs ls -t | head -1)
+          [ -n "$nshc" ] || { echo "bundle.nshc not found"; exit 1; }
+          mkdir -p dist/rustflix-linux-x86_64
+          cp target/release/rustflix dist/rustflix-linux-x86_64/
+          cp -R "$(dirname "$nshc")" dist/rustflix-linux-x86_64/nsh
+          find dist -maxdepth 3 | sort
+
+      - name: Smoke test (15 s under Xvfb, software Vulkan)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libgl1-mesa-dri
+          cd dist/rustflix-linux-x86_64
+          set +e
+          RUST_LOG=info xvfb-run -a timeout 15 ./rustflix >smoke.log 2>&1
+          code=$?
+          tail -n 60 smoke.log
+          rm -f smoke.log
+          # 124 = still running when the timeout stopped it.
+          echo "exit code: $code"
+          [ "$code" = 124 ]
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rustflix-linux-x86_64
+          path: dist/rustflix-linux-x86_64
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Collect the runnable folder
+        shell: bash
+        run: |
+          # build.rs writes $OUT_DIR/app; the newest bundle.nshc is this build's.
+          nshc=$(find target/release/build -path '*/out/app/bundle.nshc' | xargs ls -t | head -1)
+          [ -n "$nshc" ] || { echo "bundle.nshc not found"; exit 1; }
+          mkdir -p dist/rustflix-windows-x86_64
+          cp target/release/rustflix.exe dist/rustflix-windows-x86_64/
+          cp -R "$(dirname "$nshc")" dist/rustflix-windows-x86_64/nsh
+          find dist -maxdepth 3 | sort
+
+      - name: Smoke test (15 s)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dir = "dist/rustflix-windows-x86_64"
+          $p = Start-Process -FilePath "$dir/rustflix.exe" -WorkingDirectory $dir -PassThru -RedirectStandardError "$env:RUNNER_TEMP/smoke.err" -RedirectStandardOutput "$env:RUNNER_TEMP/smoke.out"
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) {
+            Write-Host "exited early with code $($p.ExitCode)"
+            Get-Content "$env:RUNNER_TEMP/smoke.err" -Tail 60
+            exit 1
+          }
+          Write-Host "still running after 15 s"
+          Get-Content "$env:RUNNER_TEMP/smoke.err" -Tail 60
+          Stop-Process -Id $p.Id -Force
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rustflix-windows-x86_64
+          path: dist/rustflix-windows-x86_64
+          if-no-files-found: error
+          retention-days: 7

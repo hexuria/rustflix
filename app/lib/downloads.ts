@@ -37,6 +37,7 @@ import {
   notify,
   onEpisodeWatched,
   onStreamLink,
+  playerPhase,
   playerRoute,
   playerTitle,
   refreshStreams,
@@ -797,6 +798,20 @@ export function downloadCurrent(): DlEntry | null {
   if (!canDownload()) {
     notify("Downloads aren't available here", "error");
     return null;
+  }
+  // Nothing is playing (every source failed): there is no link to save.
+  if (playerPhase() === "failed") {
+    notify("Nothing is playing to download", "info");
+    return null;
+  }
+  // A route carrying a download's id plays that file — it is already
+  // downloaded (identity-less entries have no key to find it by).
+  if (typeof r.dl === "number") {
+    const done = get(r.dl);
+    if (done?.state === "done") {
+      notify(`${done.name} is already downloaded`, "info");
+      return done;
+    }
   }
   const ep = r.type !== "movie" ? playerEpisodes().find((x) => x.n === (r.episode ?? 1)) : undefined;
   const target: DlTarget = {

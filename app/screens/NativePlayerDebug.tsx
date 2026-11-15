@@ -14,7 +14,9 @@
 //   in the same component instead of resolving; "playdownload": a finished
 //   download's id — the real Downloads → Play path: `playDownload`, the
 //   player route, `localPage`, the native player — recording the route,
-//   phase, URL origin and failure line)
+//   phase, URL origin and failure line; with "failcheck": true it then
+//   plays a title under `rustflix.failsources`="all" and checks
+//   `downloadCurrent` refuses on the failure screen)
 // It resolves, opens a proxy session, shows the video MUTED, then records
 // to Storage `rustflix.nativetest.result` (rewritten after every step, so
 // a run that stops midway still leaves what it got):
@@ -150,7 +152,7 @@ export async function runNativeTest() {
     await save();
     return;
   }
-  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; playdownload?: number; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
+  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; playdownload?: number; failcheck?: boolean; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
   try {
     req = JSON.parse(raw);
   } catch (e) {
@@ -192,7 +194,43 @@ export async function runNativeTest() {
         break;
       }
     }
+    // The title-bar download button on this route: a `dl` route is the
+    // file itself — downloadCurrent must say "already downloaded", not
+    // enqueue a phantom title.
+    const dl = await import("../lib/downloads");
+    const dc = dl.downloadCurrent();
+    result.playdownload.downloadCurrent = {
+      returned: dc ? { dlId: dc.dlId, key: dc.key, state: dc.state } : null,
+      entries: dl.downloadList().map((x) => ({ dlId: x.dlId, key: x.key, state: x.state })),
+    };
     result.playdownload.players = await hostCall("sys.nativePlayers");
+    if (req.failcheck) {
+      // The failure screen (`rustflix.failsources` = "all" makes every
+      // source fail): the download control must refuse, not enqueue.
+      const { navigate } = await import("../lib/router");
+      step("failcheck: play a forced-fail title");
+      navigate({ name: "player", type: "movie", id: 550, title: "failcheck" });
+      const until2 = Date.now() + 240000;
+      while (Date.now() < until2 && pl.playerPhase() !== "failed") await sleep(1000);
+      result.playdownload.failcheck = {
+        phase: pl.playerPhase(),
+        fail: pl.failState()?.reason ?? null,
+      };
+      if (pl.playerPhase() === "failed") {
+        const dc2 = dl.downloadCurrent();
+        result.playdownload.failcheck.downloadCurrent = dc2
+          ? { dlId: dc2.dlId, key: dc2.key, state: dc2.state }
+          : null;
+        result.playdownload.failcheck.entries = dl.downloadList().map((x) => ({
+          dlId: x.dlId,
+          key: x.key,
+          state: x.state,
+        }));
+        step(`failcheck: downloadCurrent → ${dc2 ? `entry ${dc2.dlId} (${dc2.state})` : "refused"}`);
+      } else {
+        step(`failcheck: never reached failed (phase ${pl.playerPhase()})`);
+      }
+    }
     result.done = result.finished = true;
     await save();
     return;

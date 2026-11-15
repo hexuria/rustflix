@@ -116,7 +116,19 @@ Not verified / known problems:
   nothing. Verified live with `{"playdownload": 1}`: route
   `movie:0 dl=1`, `playerUrl` = `http://127.0.0.1:<port>/…`, phase
   `playing` in ~1.5 s, `sys.nativePlayers {live:1, playing:1}` — no
-  source-resolution errors.
+  source-resolution errors. `liveEntry`/`playDownloadOf` resolve by
+  `dlId` too (the row's Play button goes through them, not
+  `playDownload` directly).
+- **Download button on the failure screen**: the desktop title bar
+  showed `DownloadButton` whenever the player route was up — including
+  "Couldn't play this right now" — and `downloadCurrent` enqueued a
+  phantom entry that could only end in "No video link yet". The button
+  and its keyboard shortcut are now hidden/disabled in the `failed`
+  phase, and `downloadCurrent` itself refuses there (plus a `dl` route
+  answers "already downloaded" instead of enqueueing `movie:0`).
+  Verified with `failcheck`: all sources forced to fail → phase
+  `failed` ("None of the 6 sources responded") → `downloadCurrent`
+  returned `null`, no new entry.
 
 ## Milestone 4 — web views on X11 — IN PROGRESS (resolver works; per-source limits)
 

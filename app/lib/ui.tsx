@@ -44,6 +44,7 @@ import {
   canDownload,
   cancelDownload,
   downloadFor,
+  downloadList,
   enqueueDownload,
   playDownload,
   refreshDownloadSpace,
@@ -1204,6 +1205,13 @@ export function DownloadThumb(props: {
 
 /** The entry for a target right now (not tracked). */
 function liveEntry(t: DlTarget): DlEntry | null {
+  // A DlEntry knows its native id — identity-less downloads (`native:`/
+  // `legacy:` keys) have no key a route target can rebuild.
+  const id = (t as Partial<DlEntry>).dlId;
+  if (typeof id === "number") {
+    const e = untracked(downloadList).find((x) => x.dlId === id);
+    if (e) return e;
+  }
   return untracked(() => downloadFor(t.type, t.id, t.season, t.episode));
 }
 

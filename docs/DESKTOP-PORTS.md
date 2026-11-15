@@ -105,6 +105,18 @@ Not verified / known problems:
 - The TSX playback path passes `local: true` for download playback and
   the native backend plays `src` in `rustflix.video` — verified with
   `movie.mp4`, `long.mp4` and `test.mkv` download records.
+- **Fix (real Downloads → Play path)**: downloads without a title
+  identity (records whose native side has no `mediaId` — e.g. files
+  added directly, keys `native:`/`legacy:`) got key `native:<id>`,
+  which no player route can produce; `localPage` never matched, the
+  player fell through to source resolution and ended on "None of the
+  N sources could play it". `playDownload` now puts the record's
+  `dlId` on the player route (`dl`) for those entries only, and
+  `localPage` falls back to matching it when the route key finds
+  nothing. Verified live with `{"playdownload": 1}`: route
+  `movie:0 dl=1`, `playerUrl` = `http://127.0.0.1:<port>/…`, phase
+  `playing` in ~1.5 s, `sys.nativePlayers {live:1, playing:1}` — no
+  source-resolution errors.
 
 ## Milestone 4 — web views on X11 — IN PROGRESS (resolver works; per-source limits)
 
@@ -222,14 +234,21 @@ the app stays up.
   `canPickFolder`/`webBackground` are enabled for `platform.os ===
   "linux"` in `app/lib/system.ts` — the only TSX change, because the
   host calls now exist.
-- **M7 window**: nothing to build — `nsh-platform-gpui`'s chrome
-  already requests client-side decorations on Linux
-  (`_MOTIF_WM_HINTS` decorations=0 under X11) and draws GTK-style
-  caption buttons, `windowDrag` moves via `_NET_WM_MOVERESIZE`,
-  double-click zooms, and `Window.toggleFullScreen` maps to GPUI's
-  fullscreen. Verified live under XFCE on X11: minimize, maximize,
-  restore, close, title-bar drag, and fullscreen (F11 →
-  `_NET_WM_STATE_FULLSCREEN`, 1920×1080, toggles back cleanly).
+- **M7 window**: `nsh-platform-gpui`'s chrome requests client-side
+  decorations on Linux (`_MOTIF_WM_HINTS` decorations=0 under X11) and
+  draws its own caption controls, `windowDrag` moves via
+  `_NET_WM_MOVERESIZE`, double-click zooms, and
+  `Window.toggleFullScreen` maps to GPUI's fullscreen.
+  **Traffic lights**: upstream draws GTK-style round buttons at the
+  right; the user asked for the macOS look, so `Cargo.toml` patches
+  the `nsh-*` crates to `github.com/hexuria/nsh` branch
+  `linux-traffic-lights` (commit `6fb68b1`, on top of the published
+  0.4.0 — drop the `[patch.crates-io]` section once it lands
+  upstream). Linux now draws close/minimize/zoom circles at the left
+  with hover glyphs and reports the left title-bar inset like macOS.
+  Verified live: red/yellow/green circles at the window's top-left,
+  minimize click iconifies (`_NET_WM_STATE_HIDDEN`), maximize/restore
+  and drag verified earlier. Windows/macOS code paths untouched.
   Xwayland itself was not exercised — this machine has no Wayland
   session; under Wayland the same X11 path runs through Xwayland.
 - **M8 packaging**: the Linux workflow job now tars the runnable
@@ -249,6 +268,9 @@ the app stays up.
 
 - `{"download": <id>, "holdMs": n, "rect": {...}}` — finished download
   via `dl.playUrl`.
+- `{"playdownload": <id>, ...}` — finished download through the real
+  Downloads → Play path (`playDownload` → route → `localPage` → native
+  player); records route/phase/URL origin/failure line.
 - `{"stream": {"url": "...", "kind": "hls"|"file"}, ...}` — direct
   `dl.stream.open` session (no resolver).
 - `{"type","id","source",...}` — full resolve path (needs a working

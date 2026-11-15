@@ -894,7 +894,11 @@ void Promise.all([settle(loadKey), settle(loadLibrary), settle(loadDownloads), s
   // Desktop: the player screen and its web view (the WKWebView, its
   // process pool and web content process cost 100–300 ms of main thread
   // to make), at idle after the first screen and before the tab premount.
-  if (platform.desktop) setTimeout(() => playerMounted.set(true), 1800);
+  // Windows: deferred further — same upstream nested-pump crash as the
+  // resolver view (longbridge/nsh#2110); later creation usually finds no
+  // queued GPUI task to re-enter on. Still racy.
+  if (platform.desktop)
+    setTimeout(() => playerMounted.set(true), platform.os === "windows" ? 150000 : 1800);
   // Headless verification hook: `rustflix.autotest` in storage drives
   // the player through scripted actions (removed after one run).
   try {

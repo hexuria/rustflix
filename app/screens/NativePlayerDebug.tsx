@@ -147,7 +147,7 @@ export async function runNativeTest() {
     await save();
     return;
   }
-  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number };
+  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
   try {
     req = JSON.parse(raw);
   } catch (e) {
@@ -204,6 +204,16 @@ export async function runNativeTest() {
       if (typeof p?.src !== "string") throw new Error(`dl.playUrl: no src (${JSON.stringify(p)})`);
       s = { sid: "", url: p.src };
       result.downloadSrc = p.src.replace(/:\d+\//, ":<port>/");
+    } else if (req.stream?.url) {
+      // A direct `dl.stream.open` session (public test stream): the
+      // proxy path without a resolver — real sources need the hidden
+      // web view, which Cloudflare blocks on cloud machines.
+      step(`open proxy session directly (${req.stream.kind ?? "hls"})`);
+      const opened = await openStream(req.stream.url, (req.stream.kind === "file" ? "file" : "hls") as "hls" | "file", req.stream.headers ?? {});
+      if ("error" in opened) throw new Error(`dl.stream.open: ${opened.error}`);
+      s = opened;
+      sid = s.sid;
+      result.proxyUrl = s.url.replace(/\/[0-9a-f]{32}\//, "/<token>/");
     } else {
     // 1. Resolve in the hidden web view.
     step("resolve");
@@ -291,6 +301,26 @@ export async function runNativeTest() {
     // Only a fatal error ends the run (contract §1.5); others are notes.
     const err = events.find((e) => e.name === "error" && e.d?.fatal === true);
     if (err) throw new Error(`player: ${err.d?.message}`);
+
+    // 3b. Track selection: another audio track and a subtitle, when the
+    // media has them. The cues event proves the text path end to end.
+    const audioTracks: any[] = load?.d?.audioTracks ?? [];
+    const subtitleTracks: any[] = load?.d?.subtitleTracks ?? [];
+    if (audioTracks.length > 1 && handle !== null) {
+      step(`tracks: select audio ${audioTracks[1].id}`);
+      const from = events.length;
+      await controlVideo(handle, { selectAudio: audioTracks[1].id });
+      const tr = await waitFor("tracks", from, 5000);
+      result.trackSelect = { audio: tr?.d ?? null };
+    }
+    if (subtitleTracks.length > 0 && handle !== null) {
+      step(`tracks: select subtitle ${subtitleTracks[0].id}`);
+      const from = events.length;
+      await controlVideo(handle, { selectSubtitle: subtitleTracks[0].id });
+      const tr = await waitFor("tracks", from, 5000);
+      const cue = await waitFor("cues", from, 10000, (d) => Array.isArray(d?.lines) && d.lines.length > 0);
+      result.trackSelect = { ...(result.trackSelect ?? {}), subtitle: tr?.d ?? null, cue: cue?.d ?? null };
+    }
 
     // 4. Seeks.
     if (duration && duration > 30) {
@@ -433,6 +463,9 @@ export function NativePlayerDebug() {
           onProgress={(d) => record("progress", d)}
           onBuffer={(d) => record("buffer", d)}
           onSeeked={(d) => record("seeked", d)}
+          onTracks={(d) => record("tracks", d)}
+          onCues={(d) => record("cues", d)}
+          onRate={(d) => record("rate", d)}
           onEnd={(d) => record("end", d)}
           onError={(d) => record("error", d)}
         />

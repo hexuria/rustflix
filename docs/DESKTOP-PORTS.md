@@ -100,6 +100,35 @@ line, same `RefCell already borrowed`. Run:
   deferred task once the surface is placed), and/or wry could offer an
   async creation path that doesn't pump the caller's queue.
 
+### Resolution — fixed ourselves, upstream PR open
+
+We implemented the first suggested fix and verified it end-to-end:
+
+- Upstream PR: https://github.com/longbridge/gpui-fast/pull/145
+  (`fix/windows-nested-pump-app-borrow`). `fast::app_borrow` records the
+  running `AppCell` per thread; `gpui_windows` defers every `WM_GPUI_*`
+  message dispatched while the app is borrowed and re-posts the queue
+  from the platform's own message loop once the borrow is released
+  (re-posting inside the handler would spin — a nested pump that keeps
+  dispatching would deliver the copy while still borrowed).
+- Verified against the published `gpui-fast`/`gpui-fast-windows`
+  0.1.10 sources via a local `[patch.crates-io]` override (uncommitted):
+  - `examples/nested-pump-repro.rs` (rewritten to exercise the real
+    path — pump inside the launch closure's borrow with a task wake
+    pending) goes from panic to `survived (no panic)`; the log shows
+    `deferring GPUI message 1027 while app borrowed`.
+  - The real app now creates the resolver WebView2 during the first
+    draw — the exact path that used to panic 4/4 — stays alive, the
+    resolver navigates (`resolver: warm`), and a title plays in the
+    web-view player. The 120 s/150 s deferral workaround
+    (`d33dd24`) is reverted (`5f57d6a`).
+- Follow-up noise: during the nested-pump window some re-entrant
+  `update_window`/`with_window` calls still fail their `try_borrow_mut`
+  and log `RefCell already borrowed` as ERROR (they return `Result`,
+  they don't panic). Non-fatal; could be deferred the same way later.
+- Until the PR merges and a release ships, Windows builds need the
+  local patch override or a git dependency on the PR branch.
+
 ### Also done under M1
 
 - `macos-latest` `cargo build --release` job added to
@@ -121,9 +150,10 @@ line, same `RefCell already borrowed`. Run:
 
 ## Milestone 3 — native player (`rustflix.video` on Windows)
 
-Status: **implemented, compiles, NOT runtime-verified** (M1 crash still
-blocks the app before its first frame). `cargo check` is clean apart
-from dead-code warnings. Decoder proven separately by
+Status: **implemented, runtime-verified** — with the local gpui-fast
+patch (see M1 resolution) the app launches, the resolver WebView2
+builds during the first draw, and playback works. `cargo check` is
+clean apart from dead-code warnings. Decoder proven separately by
 `examples/mpv-smoke.rs` (see below).
 
 ### How frames reach the screen (what GPUI 0.1.10 offers on Windows)

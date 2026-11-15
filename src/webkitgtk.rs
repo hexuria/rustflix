@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use gtk::prelude::*;
-use webkit2gtk::glib::translate::ToGlibPtr;
+use webkit2gtk::glib::translate::{from_glib_none, IntoGlib, ToGlibPtr};
 use serde_json::{json, Value};
 use webkit2gtk::{
     ffi, glib, gio, CookieManagerExt as _, NavigationPolicyDecisionExt as _,
@@ -30,18 +30,42 @@ use webkit2gtk::{
     WebContextExt as _, WebViewExt as _,
 };
 
+/// What this module has done to one web view.
+#[derive(Default)]
+struct ViewState {
+    /// Hash of the guard script it was given.
+    script: Option<u64>,
+    /// The filter generation last applied to it.
+    filters: Option<u64>,
+    /// `markResolver` marked it.
+    resolver: bool,
+}
+
 // `MainContext::invoke` can run its callback on whichever thread iterates
 // the context, so this state is shared, not thread-local. Every GTK call
 // stays behind `is_initialized_main_thread`.
-static SCRIPTED: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
+//
+// VIEWS is keyed by the widget's address. An entry is made by `adopt`
+// and removed by that widget's `destroy` handler, and an address is only
+// reused after that, so a new web view never inherits an old one's entry.
+// No GTK call is made while the lock is held (`destroy` takes it).
+static VIEWS: OnceLock<Mutex<HashMap<usize, ViewState>>> = OnceLock::new();
 static SCRIPT: OnceLock<Mutex<String>> = OnceLock::new();
-static RESCANNING: AtomicBool = AtomicBool::new(false);
 
-fn scripted() -> &'static Mutex<HashMap<usize, u64>> {
-    SCRIPTED.get_or_init(|| Mutex::new(HashMap::new()))
+fn views() -> &'static Mutex<HashMap<usize, ViewState>> {
+    VIEWS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 fn script() -> &'static Mutex<String> {
     SCRIPT.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn key_of(wv: &webkit2gtk::WebView) -> usize {
+    wv.as_ptr() as usize
+}
+
+/// `markResolver` marked this web view.
+fn is_resolver(wv: &webkit2gtk::WebView) -> bool {
+    views().lock().unwrap().get(&key_of(wv)).is_some_and(|v| v.resolver)
 }
 
 fn fnv(s: &str) -> u64 {
@@ -77,13 +101,18 @@ pub(crate) fn webviews() -> Vec<webkit2gtk::WebView> {
     out
 }
 
-/// wry only calls `set_bounds` while a web view is shown, so a hidden one
-/// (the resolver) keeps its tiny initial allocation and the page lays out
-/// at ~200x200 CSS px: embed players never initialize and the media
-/// sniffer finds nothing. Mirror `set_bounds` for web views that are not
-/// shown: resize the foreign X window and re-allocate the widget chain
-/// (wry's GtkWindow -> GtkBox -> WebKitWebView). wry re-allocates the ones
-/// it shows.
+/// wry only calls `set_bounds` while a web view is shown, so one that is
+/// never shown (the resolver's) keeps its tiny initial allocation and the
+/// page lays out at ~200x200 CSS px: embed players never initialize and
+/// the media sniffer finds nothing. Mirror `set_bounds` for it: resize
+/// the foreign X window and re-allocate the widget chain (wry's GtkWindow
+/// -> GtkBox -> WebKitWebView).
+///
+/// Only for the resolver's view. The size request made here is a minimum
+/// that stays: on the player's web view, which is shown and sized by wry,
+/// it kept the widget at 1600x900 whatever the video area was, wry's
+/// allocation changed nothing, and WebKit never laid the page out again —
+/// the page drew its controls squeezed into the top left corner.
 fn ensure_viewport(wv: &webkit2gtk::WebView) {
     if wv.is_visible() || (wv.allocated_width() >= 800 && wv.allocated_height() >= 600) {
         return;
@@ -104,7 +133,37 @@ fn ensure_viewport(wv: &webkit2gtk::WebView) {
     wv.size_allocate(&gtk::Allocation::new(0, 0, 1600, 900));
 }
 
-/// `decide-policy` on one web view (connected once): pop-up windows are
+/// wry's `set_bounds` sizes a web view's GtkWindow whether or not the view
+/// is shown, but GTK allocates nothing to a hidden widget, and showing it
+/// afterwards allocates nothing either: the window's size has not changed
+/// since. The player's web view is built hidden at wry's default 200x200
+/// and shown when a page plays; it kept that size, and the page drew its
+/// controls squeezed into the window's top left corner. So a web view
+/// that has just been mapped takes the size of its window.
+fn fit_to_window(wv: &webkit2gtk::WebView) {
+    if !wv.is_mapped() {
+        return;
+    }
+    // The toplevel ancestor is wry's GtkWindow.
+    let mut top = wv.clone().upcast::<gtk::Widget>();
+    while let Some(p) = top.parent() {
+        top = p;
+    }
+    let Some(window) = top.window() else { return };
+    // From the X server: GDK's own idea of the size waits for an event.
+    let (_, _, w, h) = window.geometry();
+    let fits = |wv: &webkit2gtk::WebView| wv.allocated_width() == w && wv.allocated_height() == h;
+    if w <= 1 || h <= 1 || fits(wv) {
+        return;
+    }
+    top.size_allocate(&gtk::Allocation::new(0, 0, w, h));
+    if !fits(wv) {
+        wv.size_allocate(&gtk::Allocation::new(0, 0, w, h));
+    }
+    log::debug!("webkitgtk: web view sized to its window, {w}x{h}");
+}
+
+/// `decide-policy` on one web view (`adopt` connects it once): pop-up windows are
 /// always refused (the macOS navigation delegate's "pop-ups never
 /// open"), and navigations to non-web schemes are refused through the
 /// shared `verdict` — with `main = false` it reduces to the scheme
@@ -112,10 +171,6 @@ fn ensure_viewport(wv: &webkit2gtk::WebView) {
 /// is-main-frame on navigation actions, so subframe navigations must
 /// not be site-checked (embed players live in iframes).
 fn connect_policy(wv: &webkit2gtk::WebView) {
-    let key = wv.as_ptr() as usize;
-    if !policy_connected().lock().unwrap().insert(key) {
-        return;
-    }
     wv.connect_decide_policy(|_wv, decision, ptype| {
         use webkit2gtk::PolicyDecisionType::*;
         match ptype {
@@ -149,58 +204,168 @@ fn connect_policy(wv: &webkit2gtk::WebView) {
     });
 }
 
-/// Gives the stored guard script to every web view that does not have this
-/// exact source yet. WebKitGTK user scripts run at document start in every
+/// First sight of a web view: its entry in VIEWS, the handler that takes
+/// the entry out again, the navigation policy, and the viewport fix
+/// before each of its loads. False when it was already known.
+fn adopt(wv: &webkit2gtk::WebView) -> bool {
+    let key = key_of(wv);
+    {
+        let mut all = views().lock().unwrap();
+        if all.contains_key(&key) {
+            return false;
+        }
+        all.insert(key, ViewState::default());
+    }
+    wv.connect_destroy(move |_| {
+        if let Ok(mut all) = views().lock() {
+            all.remove(&key);
+        }
+    });
+    connect_policy(wv);
+    wv.connect_load_changed(|wv, event| {
+        if event == webkit2gtk::LoadEvent::Started && is_resolver(wv) {
+            ensure_viewport(wv);
+        }
+    });
+    // After wry's own show sequence has run (it maps the view, then its
+    // window).
+    wv.connect_map(move |_| {
+        glib::idle_add_once(move || {
+            if !gtk::is_initialized_main_thread() {
+                return;
+            }
+            if let Some(wv) = webviews().into_iter().find(|w| key_of(w) == key) {
+                fit_to_window(&wv);
+            }
+        });
+    });
+    true
+}
+
+/// Gives one web view the stored guard script unless it has this exact
+/// source already. WebKitGTK user scripts run at document start in every
 /// frame (`AllFrames`), which is what the resolver's media sniffer needs.
+fn give_script(wv: &webkit2gtk::WebView) {
+    let src = script().lock().unwrap().clone();
+    if src.is_empty() {
+        return;
+    }
+    let (key, hash) = (key_of(wv), fnv(&src));
+    if views().lock().unwrap().get(&key).is_some_and(|v| v.script == Some(hash)) {
+        return;
+    }
+    let Some(ucm) = wv.user_content_manager() else {
+        return;
+    };
+    let script = UserScript::new(
+        &src,
+        UserContentInjectedFrames::AllFrames,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
+    if let Some(v) = views().lock().unwrap().get_mut(&key) {
+        v.script = Some(hash);
+    }
+}
+
+/// Every web view there is now: known, with a real viewport and the
+/// current guard script (`sys.webGuard` runs this).
 fn apply_script() {
     if !gtk::is_initialized_main_thread() {
         return;
     }
-    let src = script().lock().unwrap().clone();
-    let hash = if src.is_empty() { 0 } else { fnv(&src) };
     for wv in webviews() {
-        ensure_viewport(&wv);
-        connect_policy(&wv);
-        if src.is_empty() {
-            continue;
+        adopt(&wv);
+        if is_resolver(&wv) {
+            ensure_viewport(&wv);
         }
-        let key = wv.as_ptr() as usize;
-        if scripted().lock().unwrap().get(&key) == Some(&hash) {
-            continue;
-        }
-        let Some(ucm) = wv.user_content_manager() else {
-            continue;
-        };
-        let script = UserScript::new(
-            &src,
-            UserContentInjectedFrames::AllFrames,
-            UserScriptInjectionTime::Start,
-            &[],
-            &[],
-        );
-        ucm.add_script(&script);
-        scripted().lock().unwrap().insert(key, hash);
+        give_script(&wv);
     }
 }
 
-/// Web views are created after `sys.webGuard` may already have run (the
-/// resolver host at boot, the player web view on demand), so a slow
-/// rescan keeps every new web view scripted. The invokes queue on GTK's
-/// main context, which only runs once a web view exists and NSH pumps
-/// GTK's events — before that they are a few no-ops.
-fn ensure_rescan() {
-    if RESCANNING.swap(true, Ordering::SeqCst) {
+/// A web view wry has just built (the `parent-set` hook): script and
+/// filters at once, before its first load. Rules that were waiting for a
+/// first web view compile on the next turn of GTK's loop, when wry has
+/// finished building it.
+fn on_new_view(wv: &webkit2gtk::WebView) {
+    if !adopt(wv) {
+        // `parent-set` again: it only moved.
         return;
     }
-    std::thread::spawn(|| loop {
-        std::thread::sleep(Duration::from_millis(700));
-        let _ = glib::MainContext::default().invoke(|| {
-            if gtk::is_initialized_main_thread() {
-                apply_script();
-                ensure_filters();
+    give_script(wv);
+    give_filters(wv);
+    glib::idle_add_once(|| {
+        if gtk::is_initialized_main_thread() {
+            flush_pending_rules();
+        }
+    });
+}
+
+/// SAFETY: the GSignalEmissionHook contract. `values[0]` holds the
+/// emitting instance, borrowed for the call; GTK emits on its own thread.
+unsafe extern "C" fn on_parent_set(
+    _hint: *mut glib::gobject_ffi::GSignalInvocationHint,
+    n_values: std::ffi::c_uint,
+    values: *const glib::gobject_ffi::GValue,
+    _data: glib::ffi::gpointer,
+) -> glib::ffi::gboolean {
+    if n_values > 0 && !values.is_null() {
+        // A panic must not cross into GLib.
+        let _ = std::panic::catch_unwind(|| {
+            // SAFETY: `values` points at `n_values` initialised GValues;
+            // the first is a GtkWidget (the signal's owner type).
+            let obj = unsafe { glib::gobject_ffi::g_value_get_object(values) };
+            if obj.is_null() {
+                return;
+            }
+            // SAFETY: a live GObject; `from_glib_none` takes its own ref.
+            let obj: glib::Object = unsafe { from_glib_none(obj) };
+            if let Ok(wv) = obj.downcast::<webkit2gtk::WebView>()
+                && wv.parent().is_some()
+            {
+                on_new_view(&wv);
             }
         });
-    });
+    }
+    // Stay connected.
+    glib::ffi::GTRUE
+}
+
+/// Web views are created after `sys.webGuard` may already have run (the
+/// resolver host at boot, the player web view on demand). wry has no
+/// construction hook, but it puts every web view it builds into a
+/// container, and GTK emits `parent-set` for that. An emission hook on
+/// that signal sees each new web view as it is built, so it is set up
+/// once, before its first load, and nothing has to poll for it.
+fn ensure_hook() {
+    static HOOKED: AtomicBool = AtomicBool::new(false);
+    if HOOKED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let widget = gtk::Widget::static_type().into_glib();
+    // SAFETY: GtkWidget is a registered classed type. Its signals exist
+    // once the class is initialised; the class reference is kept for the
+    // app's run, like the hook. `on_parent_set` matches GSignalEmissionHook
+    // and takes no data.
+    let id = unsafe {
+        glib::gobject_ffi::g_type_class_ref(widget);
+        let id = glib::gobject_ffi::g_signal_lookup(c"parent-set".as_ptr(), widget);
+        if id != 0 {
+            glib::gobject_ffi::g_signal_add_emission_hook(
+                id,
+                0,
+                Some(on_parent_set),
+                std::ptr::null_mut(),
+                None,
+            );
+        }
+        id
+    };
+    if id == 0 {
+        log::warn!("webkitgtk: no parent-set signal; web views made later wait for the next sys.webGuard");
+    }
 }
 
 // --- Content filters (sys.webGuard `rules` / `resolverRules`) ---------------
@@ -211,8 +376,8 @@ fn ensure_rescan() {
 // resolver rules (no images/fonts/pings — the resolver only needs
 // scripts, XHR and media) go on the views `markResolver` marked, found
 // by the `__rf_resolver__` title the resolver sets on its about:blank
-// page — the widget pointer is remembered, like macOS remembers the
-// controller.
+// page — the mark is kept in the view's `ViewState`, like macOS remembers
+// the controller.
 
 /// What the filters should be: `on` gates the ad list; `ad`/`res` are the
 /// compiled-rule identifiers (the JSON only matters until compilation is
@@ -234,26 +399,17 @@ unsafe impl<T> Sync for SendPtr<T> {}
 
 static COMPILED: OnceLock<Mutex<HashMap<String, SendPtr<ffi::WebKitUserContentFilter>>>> =
     OnceLock::new();
-/// Widget pointers `markResolver` marked.
-static RESOLVERS: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
-/// Web view -> filter generation last applied to it.
-static FILTER_VIEWS: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
+/// Bumped whenever the wanted filters change (`ViewState::filters`).
 static FILTER_GEN: AtomicU64 = AtomicU64::new(0);
-static FILTER_DIRTY: AtomicBool = AtomicBool::new(false);
 /// Rulesets waiting for the first web view: compiling before any
 /// WebKitWebView exists crashes WebKitGTK's filter store (the compile
 /// runs through the WebKit network process a web view spawns).
 static PENDING_RULES: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
-/// Web views whose decide-policy signal is already connected.
-static POLICY_CONNECTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
 /// Embed hosts from `sys.webGuard {embeds}` (site() names, lowercase).
 static EMBEDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn pending_rules() -> &'static Mutex<Vec<(String, String)>> {
     PENDING_RULES.get_or_init(|| Mutex::new(Vec::new()))
-}
-fn policy_connected() -> &'static Mutex<HashSet<usize>> {
-    POLICY_CONNECTED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 fn embeds() -> &'static Mutex<HashSet<String>> {
     EMBEDS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -264,12 +420,6 @@ fn guard_filters() -> &'static Mutex<GuardFilters> {
 }
 fn compiled() -> &'static Mutex<HashMap<String, SendPtr<ffi::WebKitUserContentFilter>>> {
     COMPILED.get_or_init(|| Mutex::new(HashMap::new()))
-}
-fn resolvers() -> &'static Mutex<HashSet<usize>> {
-    RESOLVERS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-fn filter_views() -> &'static Mutex<HashMap<usize, u64>> {
-    FILTER_VIEWS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn rule_id(kind: &str, json: &str) -> String {
@@ -397,10 +547,7 @@ fn apply_filters_to(wv: &webkit2gtk::WebView, st: &GuardFilters) {
     // manager and `ucm_ptr` would dangle.
     let ucm_stash = ucm.to_glib_none();
     let ucm_ptr = ucm_stash.0;
-    let is_res = resolvers()
-        .lock()
-        .unwrap()
-        .contains(&(wv.as_ptr() as usize));
+    let is_res = views().lock().unwrap().get(&key_of(wv)).is_some_and(|v| v.resolver);
     let compiled = compiled().lock().unwrap();
     for (id, want) in [
         (st.ad.as_deref(), st.on),
@@ -420,47 +567,46 @@ fn apply_filters_to(wv: &webkit2gtk::WebView, st: &GuardFilters) {
     }
 }
 
-/// (Re)applies the wanted filters to every web view at the current
+/// (Re)applies the wanted filters to every web view, at a new
 /// generation. GTK thread only.
 fn sync_filters() {
     if !gtk::is_initialized_main_thread() {
         return;
     }
-    FILTER_DIRTY.store(false, Ordering::SeqCst);
     let generation = FILTER_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let st = guard_filters().lock().unwrap().clone();
     for wv in webviews() {
+        adopt(&wv);
         apply_filters_to(&wv, &st);
-        filter_views()
-            .lock()
-            .unwrap()
-            .insert(wv.as_ptr() as usize, generation);
+        if let Some(v) = views().lock().unwrap().get_mut(&key_of(&wv)) {
+            v.filters = Some(generation);
+        }
     }
 }
 
-/// Keeps filters on web views created after `sys.webGuard` ran: the
-/// rescan applies scripts and fills in filters for views not yet synced
-/// at the current generation.
-fn ensure_filters() {
-    if !gtk::is_initialized_main_thread() {
+/// Filters for one web view that is not at the current generation yet
+/// (one created after the last `sync_filters`).
+fn give_filters(wv: &webkit2gtk::WebView) {
+    let key = key_of(wv);
+    let generation = FILTER_GEN.load(Ordering::SeqCst);
+    if views().lock().unwrap().get(&key).is_some_and(|v| v.filters == Some(generation)) {
         return;
     }
-    if !webviews().is_empty() {
-        let pending: Vec<(String, String)> =
-            std::mem::take(&mut *pending_rules().lock().unwrap());
-        for (id, json) in pending {
-            compile_rules(id, &json);
-        }
+    let st = guard_filters().lock().unwrap().clone();
+    apply_filters_to(wv, &st);
+    if let Some(v) = views().lock().unwrap().get_mut(&key) {
+        v.filters = Some(generation);
     }
-    let generation = FILTER_GEN.load(Ordering::SeqCst);
-    for wv in webviews() {
-        let key = wv.as_ptr() as usize;
-        if filter_views().lock().unwrap().get(&key) == Some(&generation) {
-            continue;
-        }
-        let st = guard_filters().lock().unwrap().clone();
-        apply_filters_to(&wv, &st);
-        filter_views().lock().unwrap().insert(key, generation);
+}
+
+/// Compiles the rulesets that were waiting for a first web view.
+fn flush_pending_rules() {
+    if webviews().is_empty() {
+        return;
+    }
+    let pending: Vec<(String, String)> = std::mem::take(&mut *pending_rules().lock().unwrap());
+    for (id, json) in pending {
+        compile_rules(id, &json);
     }
 }
 
@@ -473,9 +619,9 @@ fn guard(d: &Value) -> Value {
         return json!({
             "ok": true,
             "views": webviews().len(),
-            "scripted": scripted().lock().unwrap().len(),
+            "scripted": views().lock().unwrap().values().filter(|v| v.script.is_some()).count(),
             "filters": compiled().lock().unwrap().len(),
-            "resolverViews": resolvers().lock().unwrap().len(),
+            "resolverViews": views().lock().unwrap().values().filter(|v| v.resolver).count(),
         });
     }
     if let Some(src) = d.get("script").and_then(Value::as_str) {
@@ -512,20 +658,24 @@ fn guard(d: &Value) -> Value {
         // resolver's (it keeps it across navigations).
         for wv in webviews() {
             if wv.title().is_some_and(|t| t.as_str() == title) {
-                resolvers().lock().unwrap().insert(wv.as_ptr() as usize);
+                adopt(&wv);
+                if let Some(v) = views().lock().unwrap().get_mut(&key_of(&wv)) {
+                    v.resolver = true;
+                }
+                ensure_viewport(&wv);
                 marked += 1;
             }
         }
     }
+    flush_pending_rules();
     sync_filters();
     apply_script();
-    ensure_rescan();
-    ensure_eval_loop();
+    ensure_hook();
     log::info!(
         "webkitgtk: webGuard script={} bytes, views={} scripted={} filters={} marked={}",
         script().lock().unwrap().len(),
         webviews().len(),
-        scripted().lock().unwrap().len(),
+        views().lock().unwrap().values().filter(|v| v.script.is_some()).count(),
         compiled().lock().unwrap().len(),
         marked,
     );
@@ -709,55 +859,6 @@ pub(crate) fn handle_pick_folder(start: Option<String>, call: nsh_engine::HostCa
     let _ = glib::MainContext::default().invoke(move || try_invoke(start, call, 40));
 }
 
-/// File-driven eval for debugging (the app's Storage caches its JSON, so
-/// storage keys cannot be injected while it runs): write
-/// `{"index"?: n, "js": "..."}` to /tmp/rf-webeval.json and the string
-/// result lands in /tmp/rf-webeval-result.json.
-const EVAL_IN: &str = "/tmp/rf-webeval.json";
-const EVAL_OUT: &str = "/tmp/rf-webeval-result.json";
-
-fn eval_file_once() {
-    let Ok(raw) = std::fs::read_to_string(EVAL_IN) else {
-        return;
-    };
-    let _ = std::fs::remove_file(EVAL_IN);
-    let out = (|| -> Value {
-        let d: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
-        let index = d.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let js = d.get("js").and_then(Value::as_str).unwrap_or("");
-        let Some(wv) = webviews().into_iter().nth(index) else {
-            return json!({ "ok": false, "error": "no such web view" });
-        };
-        // The callback needs this (the GTK) thread, so it cannot be waited
-        // on here: it writes the result file itself.
-        wv.evaluate_javascript(js, None::<&str>, None::<&str>, None::<&webkit2gtk::gio::Cancellable>, move |res| {
-            let out = match res {
-                Ok(v) => json!({ "ok": true, "result": v.to_string() }),
-                Err(e) => json!({ "ok": false, "error": e.to_string() }),
-            };
-            let _ = std::fs::write(EVAL_OUT, out.to_string());
-        });
-        json!({ "ok": true, "pending": true })
-    })();
-    if !out.get("pending").is_some() {
-        let _ = std::fs::write(EVAL_OUT, out.to_string());
-    }
-}
-
-fn ensure_eval_loop() {
-    static ONCE: AtomicBool = AtomicBool::new(false);
-    if ONCE.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    std::thread::spawn(|| loop {
-        std::thread::sleep(Duration::from_millis(400));
-        let _ = glib::MainContext::default().invoke(|| {
-            if gtk::is_initialized_main_thread() {
-                eval_file_once();
-            }
-        });
-    });
-}
 
 /// `sys.webEval {index?, js}` diagnostic: runs `js` in web view `index`
 /// (default 0) and resolves with its string result.

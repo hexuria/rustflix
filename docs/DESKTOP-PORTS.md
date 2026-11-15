@@ -158,16 +158,72 @@ Verified resolver results (movie 1368337 / 550, `rustflix.resolvetest`):
   single-use); `src/stream`/`src/dl` are shared cross-platform code,
   so this limitation is not Linux-specific.
 
-Not verified: the visible fallback page (web-backend playback),
-subframe players on real titles, `sys.webGuard` content-blocker rules
-(`rules`/`on`/`embeds`/`markResolver` are not wired on Linux yet —
-script injection and cookies are).
+Ad blocking (`sys.webGuard`, `src/webkitgtk.rs`): NSH/wry has no web
+view configuration hook, so the Linux side finds every
+`WebKitWebView` GtkWidget in the GTK toplevel tree and drives it
+directly:
 
-## Milestones 5–8 — NOT DONE
+- `script`: `WebKitUserScript` at document start in **all frames** on
+  each view's `WebKitUserContentManager` — what macOS gets from
+  `WKUserScript forMainFrameOnly: NO`. Without this the media sniffer
+  never sees iframe players.
+- `rules` / `resolverRules`: the same WebKit content-blocker JSON
+  `WKContentRuleList` takes, compiled by `WebKitUserContentFilterStore`
+  (under `$XDG_CACHE_HOME/com.hexuria.rustflix/webkit-filters`) and
+  attached per content manager — ad rules on every view while `on`,
+  resolver rules on views `markResolver` marks (the `__rf_resolver__`
+  title protocol is unchanged, widget pointer remembered like macOS
+  remembers the controller). **Caveat found the hard way**: compiling
+  before the first `WebKitWebView` exists aborts the process (the
+  compile runs through the WebKit network process a view spawns), so
+  rulesets are queued until a view exists.
+- `decide-policy` per view: `NewWindowAction` is always ignored
+  (pop-ups never open) and non-web-scheme navigations are refused via
+  the shared `webguard::verdict` with `main = false` — the only part
+  safe to apply, because WebKitGTK 4.1 exposes no is-main-frame on
+  `WebKitNavigationAction` and subframe navigations (embed players live
+  in iframes) must not be site-checked. The macOS main-frame site
+  policy therefore has **no Linux equivalent yet**.
+- `on`, `embeds`, `stats` handled; `hosts`, `patterns`, `allow` are
+  accepted but unused (they feed the macOS navigation policy).
+- `sys.webCookies` returns the `Cookie` header WebKitGTK would send,
+  from the shared default `WebKitCookieManager`.
 
-- Ad/pop-up blocking rules (`sys.webGuard` rules/`on`/`embeds`),
-  remaining host calls (`sys.pickFolder`, Trash, `cache.clear`),
-  window controls, `.tar.gz` packaging.
+Verified: both rulesets compile (`content rules compiled` in the
+log), the resolver view is marked (`resolver view marked (1)`), and
+the app stays up.
+
+## Milestones 6–8
+
+- **M6 host calls**: `sys.pickFolder` is a `GtkFileChooserDialog`
+  (SelectFolder) on the GTK main thread; `sys.webBackground` sets the
+  background color on every web view; `fs.trash` on Linux goes through
+  `gio trash` (Freedesktop Trash) with permanent delete as fallback;
+  `fs.reveal` uses `xdg-open`; `cache.clear`/`cache.info` already
+  covered the app's own caches (image/poster cache); the WebKit
+  website-data caches are not cleared on Linux (WebKitGTK shares its
+  data dirs across apps — clearing them would nuke other programs').
+  `sys.focusContent` stays a stub (returns `{ok:false}`).
+  `canPickFolder`/`webBackground` are enabled for `platform.os ===
+  "linux"` in `app/lib/system.ts` — the only TSX change, because the
+  host calls now exist.
+- **M7 window**: nothing to build — `nsh-platform-gpui`'s chrome
+  already requests client-side decorations on Linux
+  (`_MOTIF_WM_HINTS` decorations=0 under X11) and draws GTK-style
+  caption buttons, `windowDrag` moves via `_NET_WM_MOVERESIZE`,
+  double-click zooms, and `Window.toggleFullScreen` maps to GPUI's
+  fullscreen. Verified live under XFCE on X11: minimize, maximize,
+  restore, close and title-bar drag all work; fullscreen shares the
+  same GPUI path but was not separately exercised.
+- **M8 packaging**: the Linux workflow job now tars the runnable
+  folder (`rustflix-linux-x86_64.tar.gz`, binary + `nsh/` bundle) and
+  uploads it as the `rustflix-linux-x86_64` artifact. System packages
+  a user needs (build-time equivalents in the workflow's "System
+  packages" step): `libwebkit2gtk-4.1-0`, `gstreamer1.0-plugins-base`,
+  `gstreamer1.0-plugins-good` (playback), `libgtk-3-0`, plus the
+  usual fontconfig/freetype and an X11 or XWayland session for the web
+  views. Software rendering works (`WEBKIT_DISABLE_DMABUF_RENDERER=1`
+  may be needed without a GPU).
 
 ## Test hook
 

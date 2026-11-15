@@ -72,10 +72,13 @@ jobs:
           echo "exit code: $code"
           [ "$code" = 124 ]
 
+      - name: Package
+        run: tar -czf rustflix-linux-x86_64.tar.gz -C dist rustflix-linux-x86_64
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rustflix-linux-x86_64
-          path: dist/rustflix-linux-x86_64
+          path: rustflix-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7
 

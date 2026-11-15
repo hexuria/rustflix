@@ -300,28 +300,11 @@ function mayCreateView(): boolean {
   }
 }
 
-/** Windows stopgap for longbridge/nsh#2110: a web view built inside
- * GPUI's draw while a foreground task is queued re-enters AppCell and
- * panics. Startup always has tasks queued, so the hidden view's creation
- * is deferred; later calls still race (see docs/DESKTOP-PORTS.md). */
-let resolverHostDeferred = false;
-const RESOLVER_HOST_WIN_DELAY_MS = 120000;
-
 /** Asks ResolverHost for the hidden web view if it does not exist yet
  * and the app is active. True once its ref is there. */
 export function ensureResolverHost(): boolean {
   if (!untracked(resolverHostOn)) {
     if (!mayCreateView()) return false;
-    if (platform.os === "windows") {
-      if (!resolverHostDeferred) {
-        resolverHostDeferred = true;
-        setTimeout(() => {
-          resolverHostDeferred = false;
-          ensureResolverHost();
-        }, RESOLVER_HOST_WIN_DELAY_MS);
-      }
-      return false;
-    }
     resolverHostOn.set(true);
     resolverPage.set("about:blank");
   }

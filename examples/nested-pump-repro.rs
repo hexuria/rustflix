@@ -87,22 +87,22 @@ mod imp {
             )
             .expect("open_window");
 
-            let app = cx.to_async();
-
-            // Queue a foreground task that calls `AsyncApp::update`, like
-            // nsh-platform-gpui's text-input blink (`rt::after_ms`). Its
-            // wake message is posted to the thread queue but not yet
-            // dispatched.
-            app.spawn(async move |cx| {
+            // Queue a foreground task whose wake message
+            // (WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD) sits in the thread
+            // queue, like nsh-platform-gpui's text-input blink (`rt::after_ms`).
+            cx.spawn(async move |cx| {
                 cx.update(|_app| {});
             })
             .detach();
 
-            eprintln!("repro: borrowing AppCell and pumping messages for 1.5s");
-            // Borrow the AppCell (as `AnyWindowHandle::update` does around
-            // `Window::draw`) and pump the queue. The nested dispatch runs
-            // the queued task, whose `cx.update` re-borrows -> panic.
-            app.update(|_app| pump_messages(Duration::from_millis(1500)));
+            eprintln!("repro: AppCell borrowed by launch closure; pumping messages for 1.5s");
+            // The launch closure holds `AppCell::borrow_mut` for its whole
+            // body (`let cx = &mut *this.borrow_mut()` extends the guard).
+            // Pumping the queue here is what wry's `wait_with_pump` does
+            // inside `WebItem::prepaint` -> `WebViewBuilder::build_as_child`
+            // during `Window::draw`: the nested dispatch runs the queued
+            // task, whose `cx.update` re-borrows -> panic.
+            pump_messages(Duration::from_millis(1500));
 
             eprintln!("repro: survived (no panic)");
             std::process::exit(0);

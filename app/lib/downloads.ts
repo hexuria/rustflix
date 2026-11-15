@@ -1803,8 +1803,7 @@ async function init() {
   if (DESKTOP) syncDirSetting();
   setInterval(watchPlayer, 3000);
   // The one hidden resolver web view, made now while the app is in front
-  // (on macOS creating a web view activates the app). On Windows
-  // ensureResolverHost itself defers creation (nsh#2110 stopgap).
+  // (on macOS creating a web view activates the app).
   ensureResolverHost();
   void armTestHook();
   pump();

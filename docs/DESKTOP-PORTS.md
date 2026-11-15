@@ -150,13 +150,26 @@ Verified resolver results (movie 1368337 / 550, `rustflix.resolvetest`):
   runs, but the players never start — vidfast's page shows its own
   "OOPS! SOMETHING WENT WRONG" error in WebKitGTK; the others leave
   `video.src` empty (likely gesture/compat differences vs WKWebView).
-- Upstream playback of resolved links was NOT verified end-to-end:
-  both devideosrc (`r1.dropcdn.io`) and aether (`tik.1x2.space`)
-  answers **403 to every replayed request** — with the page's exact
-  Referer/Origin/User-Agent, direct and via proxy. The CDN tokens
-  appear bound to the embed session (cookies/TLS fingerprint or
-  single-use); `src/stream`/`src/dl` are shared cross-platform code,
-  so this limitation is not Linux-specific.
+- Upstream playback of resolved links was NOT verified end-to-end,
+  and the investigation points at the CDNs refusing this environment,
+  not the port:
+  - `r1.dropcdn.io`/`ds1.dropcdn.io` (devideosrc) and
+    `tik.1x2.space` (aether) answer **403 to every replayed request** —
+    with the page's exact Referer/Origin/User-Agent, direct, via the
+    env proxy, and via `--noproxy`.
+  - The resolver WebView **itself** gets `Forbidden` fetching the
+    resolved `master.m3u8` (navigated to it in-page), and the embed
+    page's own `<video>` stays `readyState 0`/paused for the whole
+    resolve — i.e. the page's own player cannot play the stream in
+    WebKitGTK either, so the 403 is not specific to `src/stream`.
+  - ureq already honours `http(s)_proxy`/`no_proxy`
+    (`Config::default()` → `Proxy::try_from_env()`), so the stream
+    proxy and the WebView share the same egress path here.
+  - Likely cause: the CDN rejects this datacenter egress IP or
+    non-browser TLS fingerprints outright. `src/stream`/`src/dl` are
+    shared cross-platform code; macOS would hit the same wall from
+    the same network. On a normal residential connection this may
+    simply work — untested.
 
 Ad blocking (`sys.webGuard`, `src/webkitgtk.rs`): NSH/wry has no web
 view configuration hook, so the Linux side finds every

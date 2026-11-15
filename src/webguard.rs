@@ -155,7 +155,7 @@ fn site(host: &str) -> String {
 /// allowed to start has not committed yet (its redirects pass).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, PartialEq)]
-enum Verdict {
+pub(crate) enum Verdict {
     Allow,
     /// Allowed, and it starts a navigation whose redirects pass.
     Start,
@@ -163,7 +163,7 @@ enum Verdict {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn verdict(
+pub(crate) fn verdict(
     url: &str,
     main: bool,
     current: Option<&str>,

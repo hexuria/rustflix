@@ -17,14 +17,15 @@ cargo build "$@"
 
 # build.rs writes $OUT_DIR/app; OUT_DIR lives under the cargo target dir,
 # which may be shared (~/.cargo/targets/<project>-<hash>) rather than ./target.
+# A shared target dir keeps the output of earlier builds (other checkouts,
+# other versions of app/) beside this one: the newest bundle is ours.
 OUT=""
 PROFILE=debug
 for a in "$@"; do [ "$a" = "--release" ] && PROFILE=release; done
-for base in target "$HOME"/.cargo/targets/rustflix-*; do
-  cand=$(find "$base/$PROFILE" -type d -path "*rustflix-*/out/app" 2>/dev/null | head -1)
-  if [ -n "$cand" ] && [ -f "$cand/bundle.nshc" ]; then OUT="$cand"; break; fi
-done
-if [ -z "$OUT" ]; then
+NSHC=$(find target/"$PROFILE"/build "$HOME"/.cargo/targets/rustflix-*/"$PROFILE"/build \
+  -path '*/out/app/bundle.nshc' 2>/dev/null | xargs ls -t 2>/dev/null | head -1 || true)
+[ -n "$NSHC" ] && OUT=$(dirname "$NSHC")
+if [ -z "$OUT" ] || [ ! -f "$OUT/bundle.nshc" ]; then
   echo "sync-bundle: bundle.nshc not found" >&2
   exit 1
 fi

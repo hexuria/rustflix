@@ -33,6 +33,11 @@ async-channel = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The Windows native player (src/player/win): BGRA frames as GPUI
+# `RenderImage`s (image is already in the tree through gpui-fast).
+[target.'cfg(target_os = "windows")'.dependencies]
+image = "0.25"
+
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore
 # (all already in the tree through wry).
 [target.'cfg(target_os = "macos")'.dependencies]

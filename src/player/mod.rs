@@ -19,6 +19,8 @@
 pub(crate) mod av;
 #[cfg(target_os = "macos")]
 mod component;
+#[cfg(target_os = "windows")]
+pub(crate) mod win;
 
 use nsh_engine::HostChannel;
 use nsh_platform_gpui::Components;
@@ -30,7 +32,9 @@ pub(crate) const NAME: &str = "rustflix.video";
 pub(crate) fn register(components: &Components) {
     #[cfg(target_os = "macos")]
     components.register(NAME, std::rc::Rc::new(|cx| Box::new(component::Video::new(cx))));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    components.register(NAME, std::rc::Rc::new(|cx| Box::new(win::component::Video::new(cx))));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = components;
 }
 
@@ -41,12 +45,13 @@ pub(crate) fn register_host(host: &HostChannel) {
     // downloader's 127.0.0.1 server (`…/<token>/<id>/<file>`, Range + HLS).
     host.handle("sys.nativeVideoInfo", |call| {
         let info = |pip: bool| {
-            let available = cfg!(target_os = "macos");
+            let available = cfg!(any(target_os = "macos", target_os = "windows"));
             serde_json::json!({
                 "ok": true, "available": available, "version": 1,
-                "pip": pip, "fullscreen": false, "local": available, "nowPlaying": available,
+                "pip": pip, "fullscreen": false, "local": available, "nowPlaying": cfg!(target_os = "macos"),
                 // The stream's own subtitle tracks come out as `cues` events
-                // (an AVPlayerItemLegibleOutput) for the app to draw.
+                // (an AVPlayerItemLegibleOutput on macOS, mpv `sub-text` on
+                // Windows) for the app to draw.
                 "embeddedSubtitles": available, "subtitleCues": available,
             })
         };
@@ -66,7 +71,13 @@ pub(crate) fn register_host(host: &HostChannel) {
                 call.resolve(serde_json::json!({ "ok": ok }));
             });
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let data = call.data().clone();
+            let ok = data.get("handle").and_then(serde_json::Value::as_u64).is_some_and(|h| win::control(h, &data));
+            call.resolve(serde_json::json!({ "ok": ok }));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         call.resolve(serde_json::json!({ "ok": false }));
     });
     host.handle("sys.nativePlayers", |call| {
@@ -75,7 +86,12 @@ pub(crate) fn register_host(host: &HostChannel) {
             av::LIVE.load(std::sync::atomic::Ordering::Relaxed),
             av::PLAYING.load(std::sync::atomic::Ordering::Relaxed),
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        let (live, playing) = (
+            win::LIVE.load(std::sync::atomic::Ordering::Relaxed),
+            win::PLAYING.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let (live, playing) = (0usize, 0usize);
         call.resolve(serde_json::json!({ "ok": true, "live": live, "playing": playing }));
     });

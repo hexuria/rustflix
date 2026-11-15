@@ -118,3 +118,106 @@ line, same `RefCell already borrowed`. Run:
   re-entrant borrow (or nsh moves webview creation out of `prepaint`).
 - Real streaming sites were not tested (Cloudflare bot checks on cloud
   machines); unrelated to this crash.
+
+## Milestone 3 — native player (`rustflix.video` on Windows)
+
+Status: **evaluated, not implemented.** Blocked on M1 for verification,
+but the design work below is source-verified.
+
+### How frames reach the screen (what GPUI 0.1.10 offers on Windows)
+
+- `gpui::surface()` / `Window::paint_surface()` are **Apple-only**:
+  `SurfaceSource` has a single `CVPixelBuffer` variant
+  (`gpui-fast-0.1.10/src/elements/surface.rs`), and `PaintSurface`'s
+  `image_buffer` field is `#[cfg(macos|ios)]`.
+- `draw_surfaces` in `gpui-fast-windows-0.1.10/src/directx_renderer.rs`
+  is a **no-op** — there is no external-texture/video primitive on
+  Windows at all in 0.1.10.
+- The only raster path is `Window::paint_image` → the sprite atlas
+  (`AtlasState`/`PlatformAtlas`), fed by `RenderImage`
+  (`gpui-fast-0.1.10/src/assets.rs`): CPU bytes, "BGRA format". Polychrome
+  atlas textures are `DXGI_FORMAT_B8G8R8A8_UNORM`
+  (`directx_atlas.rs`). Decoded images get their R/B channels swapped
+  into BGRA order (`platform.rs decode_static_image`); a `image::Frame`
+  is an `RgbaImage` whose raw bytes we can fill with B,G,R,A directly
+  (`ImageBuffer::from_raw`, zero-copy).
+- Atlas caveat: **no eviction**. `tiles_by_key` grows forever, so a new
+  `RenderImage` per frame must be paired with `window.drop_image(old)`
+  (which deallocates the tile) or the atlas leaks ~8 MB of GPU memory
+  per frame. With drop_image the live cost is ~1 video tile.
+- gpui-fast 0.1.15 adds "mutable dynamic textures for streaming frames"
+  (#86) + a Windows dynamic-texture backend (#131) — the *right* API for
+  video — but it doesn't compile against nsh-platform-gpui 0.4.0
+  (see M1) and doesn't fix the startup crash anyway.
+
+### Per-frame cost estimate (1080p, atlas path)
+
+- BGRA 1920×1080 = ~8.3 MB/frame. Decode output → `RenderImage` wrap is
+  zero-copy; the per-frame main-thread cost is the atlas upload
+  (`UpdateSubresource` of ~8.3 MB inside `paint_image`) plus
+  `drop_image` bookkeeping — roughly 1–3 ms on a real GPU, several ms
+  on the Basic Render Driver. At 24–30 fps that is ~25–75 ms/s of main
+  thread — acceptable if decode happens off-thread; tight but plausible.
+- Decoder must therefore produce **BGRA on a background thread** and
+  hand the main thread only the newest frame (same newest-frame-wins
+  rule as macOS's `latest` CVPixelBuffer and Linux's appsink
+  `RenderImage`). Paused = no redraws, same as today.
+
+### Decoder evaluation
+
+| Option | HLS | Contract fit | Install burden | Verdict |
+|---|---|---|---|---|
+| Media Foundation (classic `IMFSourceResolver`/Source Reader) | **No** — desktop MF does not resolve `.m3u8`; HLS needs WinRT `AdaptiveMediaSource` or a self-registered byte-stream handler | n/a | none | rejected for HLS |
+| WinRT `MediaPlayer` + `AdaptiveMediaSource` (frame-server mode) | Yes (HLS+DASH) | Partial: `IsVideoFrameServerEnabled` + `VideoFrameAvailable` + `CopyFrameToVideoSurface(IDirect3DSurface)` gives frames, but the API surface lacks volume/mute/rate and per-track selection parity, and subtitle cue access is unclear | none (OS) | fallback only |
+| GStreamer (playbin + appsink, like Linux / nsh 0.5.1 `video` feature) | Yes (hlsdemux) | Good: tracks, volume, rate, text streams | heavy: runtime + plugin set ~50–150 MB, LGPL | viable, heavier than mpv |
+| **libmpv (mpv render API, SW)** | Yes (ffmpeg hls demuxer) | **Best**: `track-list` (audio/subtitle ids, lang, title, selected), `volume`/`mute`/`speed`, `pause`, `time-pos`/`duration`, `paused-for-cache`/`seeking` (buffer), `end-file`, `sub-text`/`track-list` (cues approx.), `http-header-fields` for proxied URLs | bundled DLLs (~40–60 MB, mpv-2.dll + ffmpeg) inside the zip — no separate install; GPL-compatible with GPL-3.0 | **recommended** |
+| FFmpeg alone | Yes | Would still need an audio output + sync layer | similar DLL weight | rejected (mpv already solves it) |
+
+libmpv specifics (verified against `include/mpv/render.h`):
+
+- `MPV_RENDER_API_TYPE_SW` + `MPV_RENDER_PARAM_SW_SIZE/FORMAT/STRIDE/
+  POINTER` renders to a caller CPU buffer. Formats: `"0bgr"`, `"bgr0"`,
+  `"rgb0"`, `"0rgb"`, `"rgb24"` — all opaque; the X byte is **garbage**.
+  Verified the shader needs it: `polychrome_sprite_fragment` in
+  `gpui-fast-windows-0.1.10/src/shaders.hlsl` multiplies `sample.a` into
+  the output, so we must set alpha=255 on every frame (a stride-4 fill
+  over ~8 MB, ~1–2 ms) — no way around it with mpv's SW formats.
+- SW rendering is documented "extremely simple (but slow)": decode +
+  colorspace + scale + OSD on one CPU thread. For 1080p this is the
+  risk point on 2 vCPUs; `sw-fast`/zimg options and `maxResolution`
+  capping mitigate. Hardware decode is *not* usable anyway: GPUI's D3D11
+  device is internal and 0.1.10 has no external-texture path, so every
+  frame ends up CPU-side regardless — SW decode+render is the honest
+  minimum.
+- Alternative inside mpv: GPU render API (OpenGL) + `glReadPixels` —
+  more moving parts for no benefit on this stack; keep SW.
+
+### Proposed architecture (mirrors `av.rs`'s rules)
+
+- New `src/player/win/` (cfg windows): an mpv client on a dedicated
+  thread owning `mpv_handle` + `mpv_render_context`; renders SW BGRA
+  into a reused buffer at the capped display size; publishes the newest
+  `Arc<RenderImage>`-ready BGRA buffer + metadata (time, duration,
+  buffered ranges via `demuxer-cache-state`, track list, cues) to a
+  mutexed slot; a wake callback asks the component to redraw.
+- `component.rs`-side: a custom `Element` whose `paint` calls
+  `window.paint_image` with the latest frame's `RenderImage` and drops
+  the previous one — the Windows twin of the macOS `Surface` element.
+  `render()` returns `None`/placeholder until the first frame, exactly
+  like `player.frame()?` today.
+- `sys.nativeVideoInfo`: `available: true` only for what works — PiP
+  `false` on Windows; tracks/fit/startAt/maxResolution per mpv.
+
+### Open questions for implementation
+
+- ~~Alpha byte~~ — resolved: the sprite shader uses texture alpha; fill
+  X=255 per frame (see above).
+- `cues`: mpv gives `sub-text` (current text) but not cue in/out times;
+  options are emitting `cues` on text change (check what
+  `app/lib/nativevideo.tsx` actually consumes) or fetching the sidecar
+  subtitle file ourselves. Decide at impl time against the TSX contract.
+- mpv distribution: mpv-dev zip from mpv-player releases (build.rs or
+  CI download) vs vcpkg `libmpv` — pick smallest-friction at impl time;
+  record here.
+- Real-source codec coverage (HEVC/AV1/AC3) is whatever ffmpeg-in-mpv
+  ships — fine for the test streams; real sites untested (Cloudflare).

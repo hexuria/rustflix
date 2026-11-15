@@ -46,11 +46,37 @@ behind `cfg(target_os = "linux")`. macOS (`src/player/av.rs`,
 - **Subtitles**: text appsink buffers become `cues {time, lines}`;
   the tick clears the cue at its end. Verified end-to-end with an
   MKV carrying two audio tracks and an SRT subtitle.
-- **Deadlock found and fixed**: `send_event(SELECT_STREAMS)` (and
-  seeks) can wait on GStreamer streaming threads, which take the
-  player's mutex in the appsink callbacks. All pipeline calls now run
-  outside the `Inner` lock (`seek_prepare`/`select_streams` return a
-  job; the caller sends it after unlocking).
+- **Pipeline calls never run under the player's lock**: state changes
+  (including the stop of a replaced pipeline), seeks, rate changes and
+  `send_event(SELECT_STREAMS)` wait on GStreamer streaming threads,
+  which take the player's mutex in the appsink callbacks. `Inner` only
+  queues them as `Job`s; the player's worker thread (the one that also
+  does the 4 Hz tick) runs them in order with the lock released, so
+  they do not block the main thread either.
+- **Quality switches**: HLS changes the picture's size mid-stream. The
+  video callback reads each sample's own caps; with the first sample's
+  size kept, every frame after a switch to a smaller variant failed to
+  map (`gst_video_frame_map_id: assertion 'info->width <= meta->width'`)
+  and the picture froze or went black. Seen on a real source about 30 s
+  into playback.
+- **One quality for the whole play**: `connection-bitrate` is set on
+  hlsdemux2/dashdemux2, so the demuxer picks the best variant at start
+  and never switches by measured bandwidth. Reason: hlsdemux2
+  (GStreamer 1.28.2) never returns from a seek that arrives while a
+  variant switch is under way — `gst_hls_demux_seek` →
+  `gst_hls_demux_wait_for_variant_playlist` loops on a playlist that
+  cannot load once the seek has stopped the stream, and the calling
+  thread spins at 100 % for good (backtrace taken with
+  `gstreamer1.0-plugins-good-dbgsym`). A download of the same title
+  made switches frequent; a seek during it, or the `startAt` seek of a
+  rewatch, then hung the player, and the app moved on to the next
+  source after its timeout. Cost: no adaptive quality on a slow
+  connection (it buffers instead). Revisit when the upstream loop is
+  fixed.
+- **`startAt`**: a new pipeline prerolls in PAUSED; the worker then
+  seeks to `startAt` (once per source, as av.rs does) and only then
+  goes to PLAYING, so nothing plays from 0 first. Until the position
+  is there, `progress` reports `startAt`, not the preroll's 0.
 - **Loopback proxy**: `souphttpsrc` honours `http_proxy` even for
   `127.0.0.1`; a `deep-element-added` hook clears `proxy` on every
   `souphttpsrc` (including the ones hlsdemux creates per playlist and
@@ -147,13 +173,25 @@ WKWebView/WKUserContentController:
 - `sys.webGuard {script}` — installs the script as a
   `WebKitUserScript` with `UserContentInjectedFrames::AllFrames`
   (NSH's own injection is main-frame only; embed players live in
-  subframes). Re-scans every 700 ms so web views created later are
-  covered.
+  subframes). Web views created later are covered without polling:
+  wry parents every web view it builds, so an emission hook on
+  GtkWidget's `parent-set` sees each one as it is built and gives it
+  the script, the navigation policy and the filters before its first
+  load. Per-view state is dropped in the widget's `destroy` handler.
+- **The player's web view takes its window's size when it is shown**
+  (`fit_to_window`, on `map`). wry's `set_bounds` sizes the GtkWindow
+  while the view is still hidden, GTK allocates nothing to a hidden
+  widget, and showing it later allocates nothing either, so the view
+  kept wry's default 200x200: a page shown as the fallback for a failed
+  native play drew its controls squeezed into the top left corner. The
+  1600x900 viewport fix is now applied only to the resolver's view (it
+  pinned a minimum size on the player's view too).
 - `sys.webCookies {url}` — the `Cookie` header WebKitGTK would send,
   from the default context's cookie manager.
 - `sys.webViews` — per-view url/title/allocation/visibility.
-- `sys.webEval` + `/tmp/rf-webeval.json` — file-driven JS evaluation
-  diagnostic (the result lands in `/tmp/rf-webeval-result.json`).
+- `sys.webEval {index?, js}` — JS evaluation diagnostic, a host call
+  from the app's own bundle. (The file-driven variant that polled
+  `/tmp/rf-webeval.json` is gone: any local user could feed it.)
 
 **Root-cause fix for "loading indicator forever"**: an `opacity: 0`
 ancestor makes NSH's `geometry()` return `None`, so wry never calls
@@ -211,8 +249,8 @@ directly:
   (under `$XDG_CACHE_HOME/com.hexuria.rustflix/webkit-filters`) and
   attached per content manager — ad rules on every view while `on`,
   resolver rules on views `markResolver` marks (the `__rf_resolver__`
-  title protocol is unchanged, widget pointer remembered like macOS
-  remembers the controller). **Caveat found the hard way**: compiling
+  title protocol is unchanged, the mark is kept with the view's state
+  like macOS remembers the controller). **Caveat found the hard way**: compiling
   before the first `WebKitWebView` exists aborts the process (the
   compile runs through the WebKit network process a view spawns), so
   rulesets are queued until a view exists.
@@ -237,7 +275,8 @@ the app stays up.
 - **M6 host calls**: `sys.pickFolder` is a `GtkFileChooserDialog`
   (SelectFolder) on the GTK main thread; `sys.webBackground` sets the
   background color on every web view; `fs.trash` on Linux goes through
-  `gio trash` (Freedesktop Trash) with permanent delete as fallback;
+  `gio trash` (Freedesktop Trash); permanent delete only when there is
+  no `gio` to run, never when `gio` ran and failed;
   `fs.reveal` uses `xdg-open`; `cache.clear`/`cache.info` already
   covered the app's own caches (image/poster cache); the WebKit
   website-data caches are not cleared on Linux (WebKitGTK shares its
@@ -258,6 +297,10 @@ the app stays up.
   0.4.0 — drop the `[patch.crates-io]` section once it lands
   upstream). Linux now draws close/minimize/zoom circles at the left
   with hover glyphs and reports the left title-bar inset like macOS.
+  They need a compositor and a window manager that lists
+  `_GTK_FRAME_EXTENTS` in `_NET_SUPPORTED` (GNOME, KDE, Xfce do;
+  openbox does not): without both, gpui-fast falls back to the window
+  manager's title bar and the app shows two bars.
   Verified live: red/yellow/green circles at the window's top-left,
   minimize click iconifies (`_NET_WM_STATE_HIDDEN`), maximize/restore
   and drag verified earlier. Windows/macOS code paths untouched.

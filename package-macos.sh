@@ -19,12 +19,14 @@ PROFILE=release
 if [ "${PERF:-0}" = "1" ]; then PROFILE=perf; fi
 cargo build --profile "$PROFILE"
 
-# build.rs writes $OUT_DIR/app; find it under the cargo target dir.
+# build.rs writes $OUT_DIR/app under the cargo target dir, which may be
+# shared (~/.cargo/targets/<project>-<hash>) rather than ./target, and may
+# hold earlier builds' output beside this one: the newest bundle is ours.
+# (build/rustflix-<hash>/out or, with cargo's newer layout, build/rustflix/<hash>/out.)
 OUT=""
-for base in target "$HOME"/.cargo/targets/rustflix-*; do
-  cand=$(find "$base/$PROFILE" -type d -path "*rustflix-*/out/app" 2>/dev/null | head -1)
-  if [ -n "$cand" ] && [ -f "$cand/bundle.nshc" ]; then OUT="$cand"; break; fi
-done
+NSHC=$(find target/"$PROFILE"/build "$HOME"/.cargo/targets/rustflix-*/"$PROFILE"/build \
+  -path '*/out/app/bundle.nshc' 2>/dev/null | xargs ls -t 2>/dev/null | head -1 || true)
+[ -n "$NSHC" ] && OUT=$(dirname "$NSHC")
 [ -n "$OUT" ] || { echo "bundle.nshc not found" >&2; exit 1; }
 
 BIN=""

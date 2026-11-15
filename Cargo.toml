@@ -41,6 +41,13 @@ gstreamer-app = "0.25.2"
 gstreamer-video = "0.25.2"
 image = "0.25.10"
 smallvec = "1.16.5"
+# The web views NSH builds through wry are GtkWidgets in this process:
+# WebKitGTK's user content manager takes scripts that run in every frame
+# (the all-frames media sniffer), its cookie manager answers
+# `sys.webCookies`, and GTK's toplevel list finds the widgets. Both are
+# already in the tree through lb-wry.
+gtk = "0.18"
+webkit2gtk = { version = "2.0.1", features = ["v2_40"] }
 
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore
 # (all already in the tree through wry).

@@ -51,7 +51,18 @@ pub(crate) fn register(host: &HostChannel) {
             dispatch2::DispatchQueue::main().exec_async(move || mac::cookies(url, call));
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        host.handle("sys.webGuard", |call| {
+            let data = call.data().clone();
+            crate::webkitgtk::handle_guard(data, call);
+        });
+        host.handle("sys.webCookies", |call| {
+            let url = call.data().get("url").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            crate::webkitgtk::handle_cookies(url, call);
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     for name in ["sys.webGuard", "sys.webCookies"] {
         host.handle(name, |call| call.resolve(serde_json::json!({ "ok": false })));
     }

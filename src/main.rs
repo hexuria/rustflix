@@ -14,6 +14,8 @@ use nsh_platform_gpui::{AppOptions, AppSource, AssetBase, Bundle};
 mod dl;
 mod appkit;
 mod webguard;
+#[cfg(target_os = "linux")]
+mod webkitgtk;
 mod perf;
 mod player;
 mod stream;

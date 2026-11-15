@@ -70,10 +70,20 @@ pub(crate) fn register(host: &HostChannel) {
             mac::on_main(move || mac::pick_folder(call, start));
         });
     }
+    #[cfg(target_os = "linux")]
+    {
+        host.handle("sys.webViews", |call| crate::webkitgtk::handle_views(call));
+        host.handle("sys.webEval", |call| {
+            let data = call.data().clone();
+            crate::webkitgtk::handle_eval(data, call);
+        });
+    }
     #[cfg(not(target_os = "macos"))]
-    for name in ["sys.focusContent", "sys.webBackground", "sys.webViews", "sys.pickFolder"] {
+    for name in ["sys.focusContent", "sys.webBackground", "sys.pickFolder"] {
         host.handle(name, |call| call.resolve(serde_json::json!({ "ok": false })));
     }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    host.handle("sys.webViews", |call| call.resolve(serde_json::json!({ "ok": false })));
 }
 
 /// `{ version, build }` for `sys.appInfo`.

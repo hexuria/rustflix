@@ -11,7 +11,10 @@
 //   60000; "rect": {x, y, width, height} of the picture in window points,
 //   default 40, 80, 960×540 — e.g. the whole window to measure paint cost;
 //   "download": a finished download's id — plays its `dl.playUrl` `src`
-//   in the same component instead of resolving)
+//   in the same component instead of resolving; "playdownload": a finished
+//   download's id — the real Downloads → Play path: `playDownload`, the
+//   player route, `localPage`, the native player — recording the route,
+//   phase, URL origin and failure line)
 // It resolves, opens a proxy session, shows the video MUTED, then records
 // to Storage `rustflix.nativetest.result` (rewritten after every step, so
 // a run that stops midway still leaves what it got):
@@ -147,7 +150,7 @@ export async function runNativeTest() {
     await save();
     return;
   }
-  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
+  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; playdownload?: number; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
   try {
     req = JSON.parse(raw);
   } catch (e) {
@@ -157,6 +160,43 @@ export async function runNativeTest() {
     return;
   }
   result.request = req;
+  if (typeof req.playdownload === "number") {
+    // A finished download played through the real path — Downloads → Play
+    // → the player route → lib/downloads `localPage` → the native player.
+    // Records what the player decided (route, phase, URL origin, the
+    // failure line) instead of mounting the debug picture.
+    const { playDownload } = await import("../lib/downloads");
+    const pl = await import("../lib/player");
+    step(`play download ${req.playdownload}`);
+    playDownload(req.playdownload);
+    result.playdownload = { samples: [] as any[] };
+    const until = Date.now() + 60000;
+    while (Date.now() < until) {
+      await sleep(500);
+      const r = pl.playerRoute();
+      const snap = {
+        t: Date.now() - t0,
+        route: r ? `${r.type}:${r.id}${r.dl != null ? ` dl=${r.dl}` : ""}` : null,
+        phase: pl.playerPhase(),
+        fail: pl.failState()?.reason ?? null,
+        url: originOf(pl.playerUrl()),
+        preparing: pl.localPreparing(),
+      };
+      result.playdownload.samples.push(snap);
+      if (snap.phase === "playing" && String(snap.url).startsWith("http://127.0.0.1")) {
+        step("local playback confirmed");
+        break;
+      }
+      if (snap.phase === "failed") {
+        step(`player failed: ${snap.fail}`);
+        break;
+      }
+    }
+    result.playdownload.players = await hostCall("sys.nativePlayers");
+    result.done = result.finished = true;
+    await save();
+    return;
+  }
   const holdMs = typeof req.holdMs === "number" ? req.holdMs : 60000;
   const r0 = { ...DEFAULT_RECT, ...(req.rect ?? {}) };
   if ([r0.x, r0.y, r0.width, r0.height].every((n) => typeof n === "number" && Number.isFinite(n)) && r0.width > 0 && r0.height > 0) rect.set(r0);

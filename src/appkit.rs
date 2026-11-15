@@ -77,8 +77,22 @@ pub(crate) fn register(host: &HostChannel) {
             let data = call.data().clone();
             crate::webkitgtk::handle_eval(data, call);
         });
+        host.handle("sys.webBackground", |call| {
+            let data = call.data().clone();
+            crate::webkitgtk::handle_web_background(data, call);
+        });
+        host.handle("sys.pickFolder", |call| {
+            let start = call
+                .data()
+                .get("start")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            crate::webkitgtk::handle_pick_folder(start, call);
+        });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    host.handle("sys.focusContent", |call| call.resolve(serde_json::json!({ "ok": false })));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     for name in ["sys.focusContent", "sys.webBackground", "sys.pickFolder"] {
         host.handle(name, |call| call.resolve(serde_json::json!({ "ok": false })));
     }

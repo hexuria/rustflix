@@ -104,9 +104,68 @@ Not verified / known problems:
   the native backend plays `src` in `rustflix.video` — verified with
   `movie.mp4`, `long.mp4` and `test.mkv` download records.
 
-## Milestones 4–8 — NOT DONE
+## Milestone 4 — web views on X11 — IN PROGRESS (resolver works; per-source limits)
 
-- Web views on X11 (resolver + fallback), ad/pop-up blocking,
+WebKitGTK web views run on X11 through NSH's wry backend (X11 child
+windows of GPUI composition surfaces, GTK events pumped from the GPUI
+loop). Requirements for a user machine: X11 or Xwayland (a pure
+Wayland parent is refused by wry's `build_as_child`), GTK3 +
+WebKitGTK 4.1 (the `webkit2gtk-4.1` stack wry already links), and a
+display the web process can reach. `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+helps on GPU-less/software-rendered machines.
+
+`src/webkitgtk.rs` (Linux-only) reaches the `WebKitWebView` GtkWidgets
+through GTK's toplevel list and provides what macOS gets from
+WKWebView/WKUserContentController:
+
+- `sys.webGuard {script}` — installs the script as a
+  `WebKitUserScript` with `UserContentInjectedFrames::AllFrames`
+  (NSH's own injection is main-frame only; embed players live in
+  subframes). Re-scans every 700 ms so web views created later are
+  covered.
+- `sys.webCookies {url}` — the `Cookie` header WebKitGTK would send,
+  from the default context's cookie manager.
+- `sys.webViews` — per-view url/title/allocation/visibility.
+- `sys.webEval` + `/tmp/rf-webeval.json` — file-driven JS evaluation
+  diagnostic (the result lands in `/tmp/rf-webeval-result.json`).
+
+**Root-cause fix for "loading indicator forever"**: an `opacity: 0`
+ancestor makes NSH's `geometry()` return `None`, so wry never calls
+`set_bounds` and the hidden resolver web view kept WebKitGTK's ~200×200
+default viewport. Embed players measure 0×0 controls, the synthetic
+play click finds nothing, `video.src` stays empty and the resolver
+reports `candidates=0` on every source. `ResolverHost.tsx` now gives
+the Linux resolver web view a real 1600×900 box clipped to a 1×1
+`overflow:hidden` sliver: NSH places it (real viewport) while the
+composition surface shows one pixel. Verified: `innerWidth` 200 → 1600
+in the resolver page.
+
+Verified resolver results (movie 1368337 / 550, `rustflix.resolvetest`):
+
+- **devideosrc**: resolves a real HLS `master.m3u8` in ~2–5 s,
+  repeatedly.
+- **aether**: resolves HLS in ~10–20 s, but intermittently (its backend
+  is flaky; several 45 s timeouts between successes).
+- **vidsrc, vidfast, vidrift, vidnest**: pages load and the sniffer
+  runs, but the players never start — vidfast's page shows its own
+  "OOPS! SOMETHING WENT WRONG" error in WebKitGTK; the others leave
+  `video.src` empty (likely gesture/compat differences vs WKWebView).
+- Upstream playback of resolved links was NOT verified end-to-end:
+  both devideosrc (`r1.dropcdn.io`) and aether (`tik.1x2.space`)
+  answers **403 to every replayed request** — with the page's exact
+  Referer/Origin/User-Agent, direct and via proxy. The CDN tokens
+  appear bound to the embed session (cookies/TLS fingerprint or
+  single-use); `src/stream`/`src/dl` are shared cross-platform code,
+  so this limitation is not Linux-specific.
+
+Not verified: the visible fallback page (web-backend playback),
+subframe players on real titles, `sys.webGuard` content-blocker rules
+(`rules`/`on`/`embeds`/`markResolver` are not wired on Linux yet —
+script injection and cookies are).
+
+## Milestones 5–8 — NOT DONE
+
+- Ad/pop-up blocking rules (`sys.webGuard` rules/`on`/`embeds`),
   remaining host calls (`sys.pickFolder`, Trash, `cache.clear`),
   window controls, `.tar.gz` packaging.
 

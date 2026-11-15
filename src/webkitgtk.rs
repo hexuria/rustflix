@@ -273,6 +273,91 @@ pub(crate) fn handle_views(call: nsh_engine::HostCall) {
     });
 }
 
+/// `sys.webBackground {color}` on the GTK thread: every web view draws no
+/// background of its own until its page paints (macOS: the WKWebView's
+/// under-page color). `#rrggbb` or a name GTK knows; anything else is
+/// black. Resolves with how many web views changed.
+fn web_background(color: &str) -> Value {
+    let c = glib::GString::from(color.trim().trim_start_matches('#'));
+    let rgba = if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let v = u32::from_str_radix(&c, 16).unwrap_or(0);
+        gtk::gdk::RGBA::new(
+            ((v >> 16) & 0xff) as f64 / 255.0,
+            ((v >> 8) & 0xff) as f64 / 255.0,
+            (v & 0xff) as f64 / 255.0,
+            1.0,
+        )
+    } else {
+        gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0)
+    };
+    let mut n = 0;
+    for wv in webviews() {
+        wv.set_background_color(&rgba);
+        n += 1;
+    }
+    json!({ "ok": true, "count": n })
+}
+
+/// `sys.webBackground` from a host call (any thread).
+pub(crate) fn handle_web_background(data: Value, call: nsh_engine::HostCall) {
+    let color = data
+        .get("color")
+        .and_then(Value::as_str)
+        .unwrap_or("black")
+        .to_owned();
+    let _ = glib::MainContext::default().invoke(move || {
+        let out = web_background(&color);
+        call.resolve(out);
+    });
+}
+
+/// `sys.pickFolder {start?}` on the GTK thread: a modal
+/// GtkFileChooserDialog (SelectFolder). GTK dialogs run their own nested
+/// main loop, so the app's GTK pump keeps working while it is open.
+fn pick_folder(start: Option<String>, call: nsh_engine::HostCall) {
+    let dlg = gtk::FileChooserDialog::with_buttons(
+        Some("Choose a folder"),
+        None::<&gtk::Window>,
+        gtk::FileChooserAction::SelectFolder,
+        &[("_Cancel", gtk::ResponseType::Cancel), ("_Open", gtk::ResponseType::Accept)],
+    );
+    if let Some(dir) = start.filter(|s| !s.is_empty()) {
+        dlg.set_current_folder(&dir);
+    }
+    let res = dlg.run();
+    let out = match res {
+        gtk::ResponseType::Accept => match dlg.filename() {
+            Some(p) => json!({ "ok": true, "path": p.to_string_lossy().into_owned() }),
+            None => json!({ "ok": false }),
+        },
+        gtk::ResponseType::Cancel => json!({ "ok": true, "cancelled": true }),
+        _ => json!({ "ok": false }),
+    };
+    dlg.close();
+    call.resolve(out);
+}
+
+/// `sys.pickFolder` from a host call (any thread): GTK widgets need the
+/// main thread, and `MainContext::invoke` can land elsewhere, so retry
+/// briefly until it does.
+pub(crate) fn handle_pick_folder(start: Option<String>, call: nsh_engine::HostCall) {
+    fn try_invoke(start: Option<String>, call: nsh_engine::HostCall, tries: u32) {
+        if gtk::is_initialized_main_thread() {
+            pick_folder(start, call);
+            return;
+        }
+        if tries == 0 {
+            call.resolve(json!({ "ok": false, "error": "GTK is not running" }));
+            return;
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            try_invoke(start, call, tries - 1);
+        });
+    }
+    let _ = glib::MainContext::default().invoke(move || try_invoke(start, call, 40));
+}
+
 /// File-driven eval for debugging (the app's Storage caches its JSON, so
 /// storage keys cannot be injected while it runs): write
 /// `{"index"?: n, "js": "..."}` to /tmp/rf-webeval.json and the string

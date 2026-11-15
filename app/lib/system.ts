@@ -58,13 +58,15 @@ export function restoreBrightness(): Promise<number> {
 
 // --- macOS window fixes (src/appkit.rs) ----------------------------------------
 //
-// AppKit work the GPUI/NSH stack does not do itself. macOS only; an op
-// the host lacks (an older build) is remembered as missing and never
-// asked again. Nothing here throws.
+// AppKit/GTK work the GPUI/NSH stack does not do itself. macOS and Linux
+// (src/appkit.rs / src/webkitgtk.rs); an op the host lacks (an older
+// build) is remembered as missing and never asked again. Nothing here
+// throws.
 
 const MAC_HOST = (() => {
   try {
-    return platform.os === "macos" && host.available();
+    // Linux implements sys.pickFolder/sys.webBackground through GTK too.
+    return (platform.os === "macos" || platform.os === "linux") && host.available();
   } catch {
     return false;
   }

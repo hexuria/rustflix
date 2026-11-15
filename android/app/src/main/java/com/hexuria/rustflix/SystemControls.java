@@ -36,6 +36,12 @@ import java.util.Map;
  *       Android 13+ the back gesture leaves full screen first, reported to
  *       the app as {@code sys.fullscreen {on: false}}.
  * </ul>
+ *
+ * <p>On a TV ({@link TvRemote#isTv}) the window stays landscape, the
+ * navigation buttons are never hidden (there are none), the edge swipe back
+ * is off, and back closes the player even in full screen (full screen
+ * changes nothing on a TV, so a press there would seem lost). Every dialog
+ * window's keys pass {@link TvRemote} while the remote's keys are captured.
  */
 final class SystemControls {
     private final Activity activity;
@@ -48,6 +54,10 @@ final class SystemControls {
     private static final String KEY_HIDE_NAV = "hideNavButtons";
     /** Picture-in-picture follows the player (set by MainActivity). */
     Pip pip;
+    /** The TV remote's keys, from every dialog window too (set by MainActivity). */
+    TvRemote remote;
+    /** On a TV: no navigation buttons to hide, no edge swipe, landscape. */
+    private final boolean tv;
     private NshView nsh;
     /** The back callback that leaves full screen (Android 13+), and where. */
     private Object backCallback;
@@ -57,6 +67,7 @@ final class SystemControls {
         this.activity = activity;
         this.audio = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
         this.hideNav = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_HIDE_NAV, true);
+        this.tv = TvRemote.isTv(activity);
     }
 
     void register(NshView nsh) {
@@ -90,7 +101,7 @@ final class SystemControls {
             });
             Map<String, Object> out = new HashMap<>();
             out.put("ok", true);
-            out.put("buttons", buttonNavigation());
+            out.put("buttons", !tv && buttonNavigation());
             r.resolve(out);
         });
         nsh.handle("sys.getBrightness", (d, r) -> r.resolve(value(brightness())));
@@ -163,7 +174,9 @@ final class SystemControls {
         if (pip != null) pip.setPlayer(on);
         if (on) activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        activity.setRequestedOrientation(full
+        activity.setRequestedOrientation(tv
+                ? ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                : full
                 ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 : ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
         bars();
@@ -186,6 +199,25 @@ final class SystemControls {
             watchNewWindows();
         }
         if (fullscreen) backLeavesFullscreen(true);
+        wrapDialogs();
+    }
+
+    /**
+     * While the remote's keys are captured (or on a TV): every dialog
+     * window NSH has open passes its keys through {@link #wrapWindow}. Called
+     * whenever a window gains or loses focus (the activity's, or a dialog's
+     * through its wrapped callback): a dialog that opens later takes the
+     * focus from the window under it, which lands here. Main thread.
+     */
+    void wrapDialogs() {
+        if (remote == null || !(tv || TvRemote.capturing())) return;
+        View main = activity.getWindow().getDecorView();
+        for (View root : WebViewTweaks.windowRoots()) {
+            if (root == main || !root.isAttachedToWindow() || guarded.contains(root)) continue;
+            wrapWindow(root);
+            // It may have gained focus before it was wrapped.
+            if (root.hasWindowFocus()) remote.settleFocus(root);
+        }
     }
 
     /** While in full screen, back leaves it (on the player's own window:
@@ -198,14 +230,14 @@ final class SystemControls {
         for (View root : WebViewTweaks.windowRoots()) {
             if (root != main && root.isAttachedToWindow()) target = root;
         }
-        if (on) guardBackKey(target);
+        if (on) wrapWindow(target);
         if (Build.VERSION.SDK_INT < 33) return;
         if (backCallback != null && backDispatcher != null) {
             backDispatcher.unregisterOnBackInvokedCallback((android.window.OnBackInvokedCallback) backCallback);
         }
         backCallback = null;
         backDispatcher = null;
-        if (!on) return;
+        if (!on || tv) return;
         android.window.OnBackInvokedDispatcher d = target.findOnBackInvokedDispatcher();
         if (d == null) return;
         android.window.OnBackInvokedCallback cb = this::leaveFullscreen;
@@ -263,11 +295,17 @@ final class SystemControls {
         return id == 0 || res.getInteger(id) != 2;
     }
 
+    /** Whether the swipe from the left edge goes back: with button
+     * navigation, never on a TV (a pointer remote's drag is no swipe). */
+    boolean edgeBack() {
+        return !tv && buttonNavigation();
+    }
+
     /** The navigation buttons are kept away: the setting is on and the
      * phone has buttons. With gestures the thin pill stays (hiding it would
      * only make the back swipe need a second try). */
     private boolean hidesNavButtons() {
-        return hideNav && buttonNavigation();
+        return !tv && hideNav && buttonNavigation();
     }
 
     /**
@@ -335,7 +373,7 @@ final class SystemControls {
         // goes away with the player, so nothing is put back.
         if (player && root != activity.getWindow().getDecorView()) root.setBackgroundColor(0xff000000);
         // Its touches (the edge swipe back) and its back key pass through us.
-        guardBackKey(root);
+        wrapWindow(root);
         boolean all = player && fullscreen;
         boolean nav = !all && hidesNavButtons();
         int want = all ? 2 : nav ? 1 : 0;
@@ -383,7 +421,7 @@ final class SystemControls {
 
     private boolean swallowBackKey;
 
-    /** Player windows whose key events already pass {@link #guardBackKey}. */
+    /** Dialog windows whose events already pass {@link #wrapWindow}. */
     private final java.util.Set<View> guarded = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     /**
@@ -394,8 +432,14 @@ final class SystemControls {
      * only leaves full screen. Reaches the window through DecorView's
      * {@code mWindow} (a non-SDK field, reflection); where that is refused
      * the key keeps NSH's behaviour (the gesture still works).
+     *
+     * <p>The same callback hands the TV remote's keys to {@link TvRemote}
+     * before the dialog (or any view in it) sees them, and on a focus change
+     * settles the window's focus and wraps any dialog that has just opened
+     * ({@link #wrapDialogs}). Where the reflection is refused, a dialog's
+     * remote keys stay NSH's (they do nothing there).
      */
-    private void guardBackKey(View root) {
+    private void wrapWindow(View root) {
         if (guarded.contains(root) || root == activity.getWindow().getDecorView()) return;
         try {
             java.lang.reflect.Field f = root.getClass().getDeclaredField("mWindow");
@@ -406,7 +450,7 @@ final class SystemControls {
             if (inner == null) return;
             // Swipe from the left edge: the same as the back key, sent
             // through this window's callback (so full screen is left first).
-            final EdgeBack edge = new EdgeBack(root, this::buttonNavigation, () -> {
+            final EdgeBack edge = new EdgeBack(root, this::edgeBack, () -> {
                 android.view.Window.Callback cb = w.getCallback();
                 if (cb == null) return;
                 long now = android.os.SystemClock.uptimeMillis();
@@ -429,13 +473,19 @@ final class SystemControls {
                             if (taken) return true;
                         }
                         if ("dispatchKeyEvent".equals(method.getName())
+                                && args != null && args.length == 1 && args[0] instanceof android.view.KeyEvent
+                                && remote != null && remote.dispatch((android.view.KeyEvent) args[0], w, root)) {
+                            return true;
+                        }
+                        if ("dispatchKeyEvent".equals(method.getName())
                                 && args[0] instanceof android.view.KeyEvent
                                 && ((android.view.KeyEvent) args[0]).getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
                             android.view.KeyEvent e = (android.view.KeyEvent) args[0];
                             // A press that began in full screen is ours to
                             // the end (the back callback may leave full
-                            // screen between its down and its up).
-                            if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) swallowBackKey = fullscreen;
+                            // screen between its down and its up). Not on
+                            // a TV: there back closes the player.
+                            if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) swallowBackKey = fullscreen && !tv;
                             if (swallowBackKey) {
                                 if (e.getAction() == android.view.KeyEvent.ACTION_UP) {
                                     swallowBackKey = false;
@@ -444,11 +494,19 @@ final class SystemControls {
                                 return true;
                             }
                         }
+                        Object result;
                         try {
-                            return method.invoke(inner, args);
+                            result = method.invoke(inner, args);
                         } catch (java.lang.reflect.InvocationTargetException ex) {
                             throw ex.getCause();
                         }
+                        if ("onWindowFocusChanged".equals(method.getName()) && remote != null) {
+                            // Focus went to another window (a dialog over
+                            // this one) or came back here.
+                            if (Boolean.TRUE.equals(args[0])) remote.settleFocus(root);
+                            wrapDialogs();
+                        }
+                        return result;
                     });
             w.setCallback(wrapped);
             guarded.add(root);

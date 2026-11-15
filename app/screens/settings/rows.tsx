@@ -4,7 +4,7 @@
 // Rows put their control on the right on wide screens and under the label
 // on phones (`stackedRows`); switches and value rows stay on one line.
 
-import { computed, effect, Image, signal, Text, untracked, View, type JSX, type ViewRef } from "nsh";
+import { computed, effect, Image, signal, Text, untracked, View, type InputRef, type JSX, type ViewRef } from "nsh";
 import { Dialog, Input, Switch } from "nsh/base";
 import { notify } from "../../lib/player";
 import { focusContent } from "../../lib/system";
@@ -12,6 +12,7 @@ import { BUNDLED_SUBDL_KEY, BUNDLED_WYZIE_KEY } from "../../lib/subtitles";
 import { clearCache, hasBundledKey, loadKey, savedKey, saveKey } from "../../lib/tmdb";
 import { saveSettings, settings } from "../../lib/store";
 import { Button } from "../../lib/ui";
+import { tvFocus, tvMode, TvScope, useFocusable, type TvKey } from "../../lib/tv";
 import { Glyph, icon } from "../PlayerControls";
 import { openPage } from "./nav";
 import type { CategoryDef, Confirm, Control, RowDef, SectionDef } from "./schema";
@@ -59,7 +60,10 @@ export function SectionView(props: { section: SectionDef }) {
     <View class="gap-1.5">
       <If when={props.section.title}>
         {(t) => (
-          <Text class="px-4 text-xs font-semibold uppercase text-muted-foreground" style={{ letterSpacing: 0.4 }}>
+          <Text
+            class={`px-4 ${tvMode() ? "text-sm" : "text-xs"} font-semibold uppercase text-muted-foreground`}
+            style={{ letterSpacing: 0.4 }}
+          >
             {t()}
           </Text>
         )}
@@ -87,7 +91,7 @@ export function SectionView(props: { section: SectionDef }) {
       </If>
       <If when={props.section.footer}>
         {(t) => (
-          <Text class="px-4 text-xs text-muted-foreground" style={{ flexShrink: 0 }}>
+          <Text class={`px-4 ${tvMode() ? "text-sm" : "text-xs"} text-muted-foreground`} style={{ flexShrink: 0 }}>
             {t()}
           </Text>
         )}
@@ -153,10 +157,10 @@ export function RowText(props: { row: RowDef; trailing?: JSX.Element }) {
         {props.trailing}
       </View>
       <If when={props.row.description}>
-        {(d) => <Text class="text-xs text-muted-foreground">{d()}</Text>}
+        {(d) => <Text class={tvMode() ? "text-sm text-muted-foreground" : "text-xs text-muted-foreground"}>{d()}</Text>}
       </If>
       <If when={props.row.detail?.()}>
-        {(d) => <Text class="text-xs text-muted-foreground">{d()}</Text>}
+        {(d) => <Text class={tvMode() ? "text-sm text-muted-foreground" : "text-xs text-muted-foreground"}>{d()}</Text>}
       </If>
     </View>
   );
@@ -177,7 +181,7 @@ export function Row(props: { row: RowDef; control?: JSX.Element; stack?: boolean
 }
 
 export function SwitchRow(props: { row: RowDef; get: () => boolean; set: (on: boolean) => void }) {
-  return (
+  const sw = () => (
     <Switch
       checked={props.get()}
       onChange={({ checked }) => props.set(checked)}
@@ -188,6 +192,14 @@ export function SwitchRow(props: { row: RowDef; get: () => boolean; set: (on: bo
     >
       <RowText row={props.row} />
     </Switch>
+  );
+  if (!untracked(tvMode)) return sw();
+  // TV: the row is one focusable around the switch: select toggles it.
+  const tv = useFocusable({ onPress: () => props.set(!props.get()), key: () => `row:${props.row.id}` });
+  return (
+    <View ref={tv.ref} onMouseEnter={tv.onMouseEnter} class={tv.focused() ? tvFocus.row : ""}>
+      {sw()}
+    </View>
   );
 }
 
@@ -215,15 +227,15 @@ export function Segmented(props: {
             onPress={() => props.onChange(o().value)}
             class={
               props.value() === o().value
-                ? "h-8 cursor-pointer items-center justify-center rounded-md bg-zinc-600 px-3"
-                : "h-8 cursor-pointer items-center justify-center rounded-md px-3 hover:bg-white/5 active:bg-white/10"
+                ? `${tvMode() ? "h-9" : "h-8"} cursor-pointer items-center justify-center rounded-md bg-zinc-600 px-3`
+                : `${tvMode() ? "h-9" : "h-8"} cursor-pointer items-center justify-center rounded-md px-3 hover:bg-white/5 active:bg-white/10`
             }
             style={props.fill ? { flexGrow: 1, flexBasis: 0 } : undefined}
           >
             <Text
               class={props.value() === o().value ? "font-semibold text-white" : "font-medium text-zinc-300"}
               allowFontScaling={false}
-              style={{ fontSize: 13, lineHeight: 16, numberOfLines: 1 }}
+              style={{ fontSize: tvMode() ? 15 : 13, lineHeight: tvMode() ? 18 : 16, numberOfLines: 1 }}
             >
               {o().label}
             </Text>
@@ -234,12 +246,54 @@ export function Segmented(props: {
   );
 }
 
+/** TV: left / right step a segmented value (consumed only when it moved,
+ * so at either end the D-pad leaves the row); select steps right, around. */
+export function segmentedKeys(
+  options: () => { value: string }[],
+  get: () => string,
+  set: (v: string) => void,
+): (k: TvKey) => boolean {
+  return (k) => {
+    if (k.action !== "down") return false;
+    const list = options();
+    const i = list.findIndex((o) => o.value === get());
+    if (k.key === "left" || k.key === "right") {
+      const j = i + (k.key === "left" ? -1 : 1);
+      if (i < 0 || j < 0 || j >= list.length) return false;
+      set(list[j].value);
+      return true;
+    }
+    if (k.key === "select" && k.repeat === 0 && list.length > 0) {
+      set(list[(i + 1) % list.length].value);
+      return true;
+    }
+    return false;
+  };
+}
+
 export function SegmentedRow(props: {
   row: RowDef;
   options: { value: string; label: string }[];
   get: () => string;
   set: (v: string) => void;
 }) {
+  // TV: the row is one focusable; left / right change the value.
+  const tv = useFocusable({
+    key: () => `row:${props.row.id}`,
+    onKey: segmentedKeys(() => props.options, props.get, props.set),
+  });
+  if (untracked(tvMode)) {
+    return (
+      <View ref={tv.ref} onMouseEnter={tv.onMouseEnter} class={tv.focused() ? tvFocus.row : ""}>
+        <Row
+          row={props.row}
+          control={
+            <Segmented label={props.row.label} options={props.options} value={props.get} onChange={props.set} />
+          }
+        />
+      </View>
+    );
+  }
   return (
     <Row
       row={props.row}
@@ -259,12 +313,18 @@ export function SegmentedRow(props: {
 
 /** A value and a chevron: opens a picker. */
 export function ValueRow(props: { row: RowDef; value: () => string; onPress: () => void }) {
+  const tv = useFocusable({ onPress: () => props.onPress(), key: () => `row:${props.row.id}` });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={`${props.row.label}, ${props.value()}`}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={props.onPress}
-      class="min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 hover:bg-muted/50 active:bg-muted"
+      class={`min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 ${
+        tv.focused() ? tvFocus.row : "hover:bg-muted/50 active:bg-muted"
+      }`}
     >
       <RowText row={props.row} />
       <Text class="text-sm text-muted-foreground" style={{ numberOfLines: 1, maxWidth: stackedRows() ? 130 : 220 }}>
@@ -347,8 +407,13 @@ export function FieldRow(props: { row: RowDef; keyId: keyof typeof KEYS }) {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => void commit(), KEY_PAUSE_MS);
   });
+  // TV: the field is a focusable around the input: select opens the
+  // keyboard, up / down leave it (the host takes the focus off it).
+  let input: InputRef | undefined;
+  const tv = useFocusable({ onPress: () => input?.focus(), key: () => `row:${props.row.id}` });
   const field = (
     <Input
+      ref={(r: InputRef) => (input = r)}
       value={draft()}
       onChange={({ value }) => {
         edited = true;
@@ -359,7 +424,10 @@ export function FieldRow(props: { row: RowDef; keyId: keyof typeof KEYS }) {
       }}
       onSubmit={() => void commit()}
       onBlur={() => void commit()}
-      onFocus={focusContent}
+      onFocus={() => {
+        focusContent();
+        tv.claim();
+      }}
       placeholder={k.builtIn() ? "Leave empty to use the built-in key" : "Paste your key"}
       accessibilityLabel={`${props.row.label} key`}
       autoCorrect={false}
@@ -376,11 +444,23 @@ export function FieldRow(props: { row: RowDef; keyId: keyof typeof KEYS }) {
         <If when={mark()}>
           <View class="flex-row items-center gap-1">
             <Glyph d="check" size={13} color="#34d399" />
-            <Text class="text-xs font-medium text-emerald-400">{mark()}</Text>
+            <Text class={`${tvMode() ? "text-sm" : "text-xs"} font-medium text-emerald-400`}>{mark()}</Text>
           </View>
         </If>
       }
-      control={field}
+      control={
+        tvMode() ? (
+          <View
+            ref={tv.ref}
+            onMouseEnter={tv.onMouseEnter}
+            class={`rounded-lg ${tv.focused() ? "outline-4 outline-offset-2 outline-white" : ""}`}
+          >
+            {field}
+          </View>
+        ) : (
+          field
+        )
+      }
     />
   );
 }
@@ -389,20 +469,29 @@ export function FieldRow(props: { row: RowDef; keyId: keyof typeof KEYS }) {
 
 /** A red-tinted button for actions that throw something away. */
 export function DangerButton(props: { label: string; onPress: () => void; busy?: boolean; flex?: boolean; solid?: boolean }) {
+  const press = () => {
+    if (!props.busy) props.onPress();
+  };
+  const tv = useFocusable({ onPress: press });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.label}
-      onPress={() => {
-        if (!props.busy) props.onPress();
-      }}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
+      onPress={press}
       class={`h-9 cursor-pointer flex-row items-center justify-center rounded-[10px] px-4 ${
-        props.solid ? "bg-red-600 hover:bg-red-500 active:bg-red-700" : "bg-red-500/15 hover:bg-red-500/25 active:bg-red-500/30"
+        tv.focused()
+          ? `${tvFocus.control} ${tvFocus.motion}`
+          : props.solid
+            ? "bg-red-600 hover:bg-red-500 active:bg-red-700"
+            : "bg-red-500/15 hover:bg-red-500/25 active:bg-red-500/30"
       } ${props.busy ? "opacity-50" : ""}`}
       style={props.flex ? { flexGrow: 1, flexBasis: 0 } : { flexShrink: 0 }}
     >
       <Text
-        class={props.solid ? "font-semibold text-white" : "font-semibold text-red-400"}
+        class={tv.focused() ? "font-semibold text-red-600" : props.solid ? "font-semibold text-white" : "font-semibold text-red-400"}
         allowFontScaling={false}
         style={{ fontSize: 14, lineHeight: 18, numberOfLines: 1 }}
       >
@@ -506,15 +595,17 @@ export function ConfirmHost() {
           }}
           class="absolute inset-0 items-center justify-center bg-black/60 px-6"
         >
+          {/* TV: the D-pad stays in the card; Cancel has the focus. */}
+          <TvScope>
           <View
             accessibilityLabel={a().title}
             class="w-full gap-3 rounded-2xl border border-border bg-card p-5"
             style={{ maxWidth: 400 }}
           >
             <Text class="text-lg font-bold text-foreground">{a().title}</Text>
-            <Text class="text-sm text-muted-foreground">{a().body}</Text>
+            <Text class={tvMode() ? "text-[15px] text-muted-foreground" : "text-sm text-muted-foreground"}>{a().body}</Text>
             <View class="flex-row justify-end gap-2 pt-2">
-              <Button label="Cancel" size="sm" flex={stackedRows()} onPress={() => answer(false)} />
+              <Button label="Cancel" size="sm" flex={stackedRows()} onPress={() => answer(false)} autoFocus />
               <If
                 when={a().destructive !== false}
                 else={<Button primary label={a().confirm} size="sm" flex={stackedRows()} onPress={() => answer(true)} />}
@@ -523,6 +614,7 @@ export function ConfirmHost() {
               </If>
             </View>
           </View>
+          </TvScope>
         </Dialog>
       )}
     </If>

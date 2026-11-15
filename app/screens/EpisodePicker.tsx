@@ -34,6 +34,7 @@ import {
 import { playDownload, type DlEntry, type DlTarget } from "../lib/downloads";
 import { DownloadButton, Skeleton } from "../lib/ui";
 import { Glyph } from "./PlayerControls";
+import { tvFocus, TvGroup, TvPressable, TvScope, useFocusable, type Focusable } from "../lib/tv";
 
 const desktop = platform.desktop;
 const CARD_W = desktop ? 320 : 280;
@@ -57,7 +58,10 @@ export function closeEpisodes() {
 export function EpisodePicker() {
   return (
     <If when={showEpisodes()}>
-      <PickerBody />
+      {/* TV: the D-pad stays in the picker; Back closes it. */}
+      <TvScope onBack={closeEpisodes}>
+        <PickerBody />
+      </TvScope>
     </If>
   );
 }
@@ -179,14 +183,13 @@ function PickerBody() {
             {route()?.title ?? ""}
           </Text>
         </View>
-        <View
-          role="button"
-          accessibilityLabel="Close"
+        <TvPressable
+          label="Close"
           onPress={closeEpisodes}
           class="h-11 w-11 cursor-pointer items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20"
         >
           <Glyph d="close" size={22} />
-        </View>
+        </TvPressable>
       </View>
 
       {/* Season chips (series with more than one season). */}
@@ -195,9 +198,9 @@ function PickerBody() {
           <View class="flex-row gap-2" style={{ paddingLeft: padL(), paddingRight: padR() }}>
             <Each of={seasons()}>
               {(s) => (
-                <View
-                  role="button"
-                  accessibilityLabel={`Season ${s()}`}
+                <TvPressable
+                  label={`Season ${s()}`}
+                  focusClass="outline-4 outline-offset-2 outline-white"
                   onPress={() => {
                     if (browsed() !== s()) load(s());
                   }}
@@ -214,7 +217,7 @@ function PickerBody() {
                   >
                     {`Season ${s()}`}
                   </Text>
-                </View>
+                </TvPressable>
               )}
             </Each>
           </View>
@@ -280,6 +283,7 @@ function PickerBody() {
                 contentW.set(e.bounds.size.width)
               }
             >
+              <TvGroup>
               <Each of={shown()}>
                 {(ep) => (
                   <EpisodeCard
@@ -300,6 +304,7 @@ function PickerBody() {
                   />
                 )}
               </Each>
+              </TvGroup>
             </View>
           </Scroll>
           {/* Desktop: arrows page the carousel. */}
@@ -339,12 +344,27 @@ function EpisodeCard(props: {
   onPlay: (e: DlEntry) => void;
 }) {
   const progress = computed(() => episodeProgress(props.season, props.ep.n) ?? 0);
+  // TV: in the D-pad's focus; the picker opens on the episode playing.
+  // Down moves onto its download control (select there downloads, and again
+  // cancels); Up comes back to the card.
+  let dl: Focusable | undefined;
+  const tv = useFocusable({
+    onPress: () => props.onPress(),
+    autoFocus: props.playing,
+    onKey: (k) => {
+      if (k.action !== "down" || k.key !== "down" || !dl) return false;
+      dl.focus();
+      return true;
+    },
+  });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={`Episode ${props.ep.n}${props.ep.name ? `: ${props.ep.name}` : ""}`}
+      onMouseEnter={tv.onMouseEnter}
       onPress={props.onPress}
-      class="cursor-pointer gap-1.5 active:opacity-80"
+      class={`cursor-pointer gap-1.5 rounded-xl active:opacity-80 ${tv.focused() ? tvFocus.card : ""}`}
       style={{ width: CARD_W }}
     >
       <View
@@ -381,7 +401,17 @@ function EpisodeCard(props: {
         <Text class="flex-1 text-sm font-bold text-foreground" style={{ numberOfLines: 1 }}>
           {`${props.ep.n}. ${props.ep.name || `Episode ${props.ep.n}`}`}
         </Text>
-        <DownloadButton target={props.target} size={20} onPlay={props.onPlay} />
+        <DownloadButton
+          target={props.target}
+          size={20}
+          onPlay={props.onPlay}
+          tvHandle={(f) => (dl = f)}
+          tvOnKey={(k) => {
+            if (k.action !== "down" || k.key !== "up") return false;
+            tv.focus();
+            return true;
+          }}
+        />
         <If when={props.ep.runtime}>
           {(m) => <Text class="text-xs text-muted-foreground">{`${m()}m`}</Text>}
         </If>

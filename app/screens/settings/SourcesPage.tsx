@@ -13,6 +13,7 @@ import { saveSettings, settings } from "../../lib/store";
 import { Badge } from "../../lib/ui";
 import { Glyph } from "../PlayerControls";
 import { sourceLanguage } from "./schema";
+import { tvFocus, useFocusable } from "../../lib/tv";
 
 /** Where `s` plays now: the mode, the platform and the learned capability. */
 function playsIn(s: Source): "native" | "web" {
@@ -32,13 +33,17 @@ function SourceRow(props: { source: Source }) {
   const chosen = () => settings().defaultSource === s.id;
   const lang = sourceLanguage(s.id);
   const where = () => playsIn(s);
+  const pick = () => void saveSettings({ defaultSource: s.id });
+  const tv = useFocusable({ onPress: pick });
   return (
     <View
+      ref={tv.ref}
+      onMouseEnter={tv.onMouseEnter}
       role="radio"
       accessibilityLabel={`${s.label}${lang ? `, ${lang}` : ""}, plays in the ${where() === "native" ? "app" : "site"} player`}
       accessibilityState={{ checked: chosen(), selected: chosen() }}
-      onPress={() => void saveSettings({ defaultSource: s.id })}
-      class="min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 hover:bg-muted/50 active:bg-muted"
+      onPress={pick}
+      class={`min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 hover:bg-muted/50 active:bg-muted ${tv.focused() ? tvFocus.row : ""}`}
     >
       <View class="w-5 items-center">
         <If when={chosen()}>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- rustflix in the system's search (SearchProvider.java): the TV remote's
+     microphone and the home screen's search show its titles, once the user
+     has it on under the TV's "Searchable apps". A picked result opens
+     MainActivity with rustflix://title/<movie|tv>/<id>. -->
+<searchable xmlns:android="http://schemas.android.com/apk/res/android"
+    android:label="@string/app_name"
+    android:hint="@string/search_hint"
+    android:searchSettingsDescription="@string/search_settings"
+    android:searchSuggestAuthority="com.hexuria.rustflix.search"
+    android:searchSuggestIntentAction="android.intent.action.VIEW"
+    android:searchSuggestIntentData="rustflix://title"
+    android:searchSuggestSelection=" ?"
+    android:searchSuggestThreshold="1"
+    android:includeInGlobalSearch="true" />

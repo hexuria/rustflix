@@ -29,6 +29,18 @@ import type { MediaType } from "./sources";
 import { debug } from "./player";
 import { formatBytes } from "./cache";
 import {
+  CONTROL_INK,
+  showActions,
+  tvFocus,
+  TvCell,
+  TvGroup,
+  tvMode,
+  useFocusable,
+  type Focusable,
+  type TvKey,
+  type TvList,
+} from "./tv";
+import {
   canDownload,
   cancelDownload,
   downloadFor,
@@ -134,20 +146,38 @@ export function Button(props: {
   disabled?: boolean;
   /** The spoken label when it says more than `label`. */
   accessibilityLabel?: string;
+  /** TV: the focus starts here when its page or dialog opens. */
+  autoFocus?: boolean;
   primary?: boolean;
   small?: boolean;
 }) {
   const variant = (): ButtonVariant => props.variant ?? (props.primary ? "primary" : "secondary");
   const sz = () => BUTTON_SIZE[props.size ?? (props.small ? "sm" : "md")];
-  const fg = () => (variant() === "primary" ? "text-primary-foreground" : "text-foreground");
+  // TV: the D-pad's select presses it, holding select long-presses it; the
+  // focused button is filled white with a dark label.
+  const tv = useFocusable({
+    onPress: () => {
+      if (!props.disabled) props.onPress?.({});
+    },
+    onLongPress: props.onLongPress ? () => (props.disabled ? undefined : props.onLongPress?.()) : undefined,
+    disabled: () => !!props.disabled,
+    autoFocus: props.autoFocus,
+  });
+  const fg = () =>
+    tv.focused() ? tvFocus.controlText : variant() === "primary" ? "text-primary-foreground" : "text-foreground";
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.accessibilityLabel ?? props.label}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={props.disabled ? undefined : props.onPress}
       onLongPress={props.disabled ? undefined : props.onLongPress}
       onContextMenu={props.onContextMenu}
-      class={`flex-row items-center justify-center gap-2 ${props.disabled ? "opacity-40" : "cursor-pointer"} ${BUTTON_VARIANT[variant()]}`}
+      class={`flex-row items-center justify-center gap-2 ${props.disabled ? "opacity-40" : "cursor-pointer"} ${
+        tv.focused() ? `${tvFocus.control} ${tvFocus.motion}` : `${BUTTON_VARIANT[variant()]} ${tvMode() ? tvFocus.motion : ""}`
+      }`}
       style={{
         height: sz().h,
         minWidth: sz().h,
@@ -169,7 +199,7 @@ export function Button(props: {
           <ControlGlyph
             name={name()}
             size={sz().icon}
-            color={variant() === "primary" ? undefined : "#fafafa"}
+            color={tv.focused() ? CONTROL_INK : variant() === "primary" ? undefined : "#fafafa"}
           />
         )}
       </If>
@@ -208,24 +238,38 @@ export function Chip(props: {
   dot?: string;
   accessibilityLabel?: string;
 }) {
-  const h = () => (props.size === "sm" ? 32 : 36);
+  // TV: a chip a little taller; focused, filled white.
+  const h = () => (props.size === "sm" ? 32 : 36) + (tvMode() ? 4 : 0);
+  const tv = useFocusable({
+    onPress: () => props.onPress?.(),
+    onLongPress: props.onLongPress ? () => props.onLongPress?.() : undefined,
+  });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.accessibilityLabel ?? props.label}
       accessibilityState={{ selected: !!props.selected }}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={props.onPress}
       onLongPress={props.onLongPress}
       onContextMenu={props.onContextMenu}
       class={`relative cursor-pointer items-center justify-center rounded-full ${
-        props.selected ? "bg-primary active:opacity-80" : "bg-white/10 hover:bg-white/15 active:bg-white/20"
-      }`}
+        tv.focused()
+          ? `${tvFocus.control} ${tvFocus.motion}`
+          : props.selected
+            ? "bg-primary active:opacity-80"
+            : "bg-white/10 hover:bg-white/15 active:bg-white/20"
+      } ${tvMode() && !tv.focused() ? tvFocus.motion : ""}`}
       style={{ height: h(), minWidth: props.minWidth ?? h(), paddingLeft: 14, paddingRight: 14 }}
     >
       <Text
-        class={`font-semibold ${props.selected ? "text-primary-foreground" : "text-zinc-300"}`}
+        class={`font-semibold ${
+          tv.focused() ? tvFocus.controlText : props.selected ? "text-primary-foreground" : "text-zinc-300"
+        }`}
         allowFontScaling={false}
-        style={{ fontSize: 14, lineHeight: 18, numberOfLines: 1, textAlign: "center" }}
+        style={{ fontSize: tvMode() ? 15 : 14, lineHeight: 18, numberOfLines: 1, textAlign: "center" }}
       >
         {props.label}
       </Text>
@@ -246,7 +290,7 @@ export function Badge(props: { text: string; accent?: boolean; green?: boolean }
       class={`items-center justify-center rounded-md px-2 ${
         props.accent ? "bg-primary" : props.green ? "bg-emerald-500/20" : "bg-white/10"
       }`}
-      style={{ height: 24 }}
+      style={{ height: tvMode() ? 26 : 24 }}
     >
       <Text
         class={`font-semibold ${
@@ -257,7 +301,7 @@ export function Badge(props: { text: string; accent?: boolean; green?: boolean }
               : "text-zinc-300"
         }`}
         allowFontScaling={false}
-        style={{ fontSize: 12, lineHeight: 16, numberOfLines: 1 }}
+        style={{ fontSize: tvMode() ? 14 : 12, lineHeight: tvMode() ? 18 : 16, numberOfLines: 1 }}
       >
         {props.text}
       </Text>
@@ -413,7 +457,7 @@ export async function openCardMenu(t: CardTarget, at?: { x: number; y: number })
       });
     } else if (id === "forget") void removeProgressForTitle(t.type, t.id);
   };
-  if (hasMenu) {
+  if (hasMenu && !tvMode()) {
     await Menu.popup(
       actions.flatMap((a, i) => [
         i === 3 ? ({ type: "separator" } as const) : null,
@@ -424,7 +468,8 @@ export async function openCardMenu(t: CardTarget, at?: { x: number; y: number })
     return;
   }
   try {
-    const { action } = await AlertDialog.show({
+    // TV: the TV's own sheet (lib/tv.tsx), in the D-pad's focus.
+    const { action } = await showActions({
       title: t.title,
       presentation: "actionSheet",
       actions: [
@@ -543,7 +588,8 @@ function prefetchInRow(url: string) {
 export function posterGrid(width: number): { cols: number; cardW: number; gap: number } {
   const phone = width < 520;
   const gap = phone ? 12 : 16;
-  const min = phone ? 96 : 150;
+  // TV: posters as wide as the rails' (Home), five or six across.
+  const min = tvMode() ? 128 : phone ? 96 : 150;
   const cols = Math.max(phone ? 3 : 2, Math.floor((width + gap) / (min + gap)));
   return { cols, cardW: Math.max(60, Math.floor((width - (cols - 1) * gap) / cols)), gap };
 }
@@ -568,10 +614,19 @@ export function PosterCard(props: {
     key: cardKey,
   }));
   prefetchInRow(props.image);
+  // TV: select opens it, holding select (or the menu key) opens its menu;
+  // the focused poster gets the ring and lifts.
+  const tv = useFocusable({
+    onPress: () => press.onPress(),
+    onLongPress: () => void openCardMenu(props.target),
+  });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.target.title}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={press.onPress}
       onLongPress={press.onLongPress}
       onContextMenu={press.onContextMenu}
@@ -580,7 +635,7 @@ export function PosterCard(props: {
     >
       <View
         ref={(n: ViewRef) => (art = n)}
-        class={`relative rounded-lg bg-muted ${RING}`}
+        class={`relative rounded-lg bg-muted ${RING} ${tvMode() ? tvFocus.motion : ""} ${tv.focused() ? tvFocus.card : ""}`}
         // Hidden while a poster flight stands for it (lib/hero.tsx).
         style={{ width: w(), height: w() * 1.5, opacity: hiddenCard() === cardKey ? 0 : 1 }}
       >
@@ -597,10 +652,13 @@ export function PosterCard(props: {
           )}
         </If>
       </View>
-      <Text class="text-xs font-medium text-foreground" style={{ numberOfLines: 1 }}>
+      <Text
+        class={`${tvMode() ? "pt-1 text-[15px]" : "text-xs"} font-medium ${tv.focused() ? "text-white" : "text-foreground"}`}
+        style={{ numberOfLines: 1 }}
+      >
         {props.target.title}
       </Text>
-      <Text class="text-[11px] text-muted-foreground" style={{ numberOfLines: 1 }}>
+      <Text class={`${tvMode() ? "text-sm" : "text-[11px]"} text-muted-foreground`} style={{ numberOfLines: 1 }}>
         {props.subtitle ?? ""}
       </Text>
     </View>
@@ -663,6 +721,10 @@ export function ProgressCard(props: { progress: Progress; width?: number }) {
   });
   const press = cardPress(target, () => navigate(resumeRoute(p())));
   prefetchInRow(p().poster);
+  const tv = useFocusable({
+    onPress: () => press.onPress(),
+    onLongPress: () => void openCardMenu(target()),
+  });
   const pct = computed(() => Math.min(100, (p().position / Math.max(1, p().duration)) * 100));
   const sub = computed(() => {
     const ep = episodeLabel(p());
@@ -671,15 +733,21 @@ export function ProgressCard(props: { progress: Progress; width?: number }) {
   });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={`Resume ${p().title}`}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={press.onPress}
       onLongPress={press.onLongPress}
       onContextMenu={press.onContextMenu}
       style={{ width: w }}
       class="group cursor-pointer gap-1 active:opacity-70"
     >
-      <View class={`relative rounded-lg bg-muted ${RING}`} style={{ width: w, height: h }}>
+      <View
+        class={`relative rounded-lg bg-muted ${RING} ${tvMode() ? tvFocus.motion : ""} ${tv.focused() ? tvFocus.card : ""}`}
+        style={{ width: w, height: h }}
+      >
         <Image
           src={p().poster}
           fadeDuration={fade()}
@@ -694,12 +762,12 @@ export function ProgressCard(props: { progress: Progress; width?: number }) {
           <View class="h-1 bg-primary" style={{ width: `${pct()}%` }} />
         </View>
       </View>
-      <Text class="text-xs font-medium text-foreground" style={{ numberOfLines: 1 }}>
+      <Text class={`${tvMode() ? "pt-1 text-[15px]" : "text-xs"} font-medium text-foreground`} style={{ numberOfLines: 1 }}>
         {/* Older builds saved "Untitled" when the name was not known yet:
             nothing rather than a placeholder (the next save repairs it). */}
         {p().title === "Untitled" ? "" : p().title}
       </Text>
-      <Text class="text-[11px] text-muted-foreground" style={{ numberOfLines: 1 }}>
+      <Text class={`${tvMode() ? "text-sm" : "text-[11px]"} text-muted-foreground`} style={{ numberOfLines: 1 }}>
         {sub()}
       </Text>
     </View>
@@ -915,12 +983,16 @@ export function Row(props: {
           scrollEventThrottle={desktop ? 50 : undefined}
         >
           <View
-            class="flex-row gap-3 pb-2 pt-1"
+            // TV: room for the focused card's ring and lift.
+            class={tvMode() ? "flex-row gap-3 pb-5 pt-5" : "flex-row gap-3 pb-2 pt-1"}
             // The scrollable width: the cards plus the Scroll's own px-4
             // on both sides.
             onLayout={(e) => contentW.set(e.bounds.size.width + 2 * ROW_PAD)}
           >
-            <RowPrefetch.Provider value={{ n: 0 }}>{props.children}</RowPrefetch.Provider>
+            {/* TV: one rail: left / right stay in it. */}
+            <TvGroup>
+              <RowPrefetch.Provider value={{ n: 0 }}>{props.children}</RowPrefetch.Provider>
+            </TvGroup>
           </View>
         </Scroll>
         <If when={desktop && hovered() && x() > 4}>
@@ -970,6 +1042,26 @@ export function ListRow<T>(props: {
     x.set(to);
     ref?.scrollTo({ x: to, animated: true });
   };
+  // TV: the rail's cards in the D-pad's focus. The list mounts the cards
+  // near its viewport only: a card is brought into view through the list
+  // (the one before it kept in view), and the list itself is revealed in
+  // the page.
+  let box: ViewRef | undefined;
+  const tvList: TvList = {
+    scrollToIndex: (i) => {
+      try {
+        // The first two: the start of the rail, with its inset (an item
+        // scrolled to sits flush at the edge, which cuts its ring).
+        if (i <= 1) ref?.scrollTo({ x: 0, animated: true });
+        else
+          (ref as unknown as { scrollToIndex(o: { index: number; viewPosition?: number; animated?: boolean }): void })
+            ?.scrollToIndex({ index: i - 1, viewPosition: 0, animated: true });
+      } catch {}
+    },
+    container: () => box,
+    count: () => props.items.length,
+  };
+  const pad = { top: tvMode() ? 18 : 4, bottom: tvMode() ? 20 : 8 };
   // The first card measured sets the height (the estimate goes); a taller
   // one later raises it. Cards of a row are alike, so it settles at once.
   let measuredOnce = false;
@@ -984,30 +1076,33 @@ export function ListRow<T>(props: {
     <View class="gap-2">
       <Text class="px-4 text-lg font-bold text-foreground">{props.title}</Text>
       <View
+        ref={(n: ViewRef) => (box = n)}
         class="relative"
         onMouseEnter={desktop ? () => hovered.set(true) : undefined}
         onMouseLeave={desktop ? () => hovered.set(false) : undefined}
       >
-        <List
-          ref={(n: ScrollRef) => (ref = n)}
-          horizontal
-          each={props.items}
-          estimatedItemSize={props.itemWidth + LIST_GAP}
-          contentStyle={{ paddingHorizontal: ROW_PAD, paddingTop: 4, paddingBottom: 8, gap: LIST_GAP }}
-          style={{ height: cardH() + 12 }}
-          onLayout={(e: { bounds: { size: { width: number } } }) => viewW.set(e.bounds.size.width)}
-          onScroll={desktop ? (e: { offset: { x: number } }) => x.set(e.offset.x) : undefined}
-          scrollEventThrottle={desktop ? 50 : undefined}
-        >
-          {(item: () => T) => (
-            <View
-              style={{ alignSelf: "flex-start" }}
-              onLayout={(e: { bounds: { size: { height: number } } }) => measured(e.bounds.size.height)}
-            >
-              {props.children(item)}
-            </View>
-          )}
-        </List>
+        <TvGroup list={tvList}>
+          <List
+            ref={(n: ScrollRef) => (ref = n)}
+            horizontal
+            each={props.items}
+            estimatedItemSize={props.itemWidth + LIST_GAP}
+            contentStyle={{ paddingHorizontal: ROW_PAD, paddingTop: pad.top, paddingBottom: pad.bottom, gap: LIST_GAP }}
+            style={{ height: cardH() + pad.top + pad.bottom }}
+            onLayout={(e: { bounds: { size: { width: number } } }) => viewW.set(e.bounds.size.width)}
+            onScroll={desktop ? (e: { offset: { x: number } }) => x.set(e.offset.x) : undefined}
+            scrollEventThrottle={desktop ? 50 : undefined}
+          >
+            {(item: () => T, index: () => number) => (
+              <View
+                style={{ alignSelf: "flex-start" }}
+                onLayout={(e: { bounds: { size: { height: number } } }) => measured(e.bounds.size.height)}
+              >
+                <TvCell index={index}>{props.children(item)}</TvCell>
+              </View>
+            )}
+          </List>
+        </TvGroup>
         <If when={desktop && hovered() && x() > 4}>
           <RowArrow side="left" onPress={() => page(-1)} />
         </If>
@@ -1202,7 +1297,7 @@ export async function chooseAction(
   if (choosing || actions.length === 0) return;
   choosing = true;
   try {
-    if (hasMenu) {
+    if (hasMenu && !tvMode()) {
       const firstDestructive = actions.findIndex((a) => a.destructive);
       await Menu.popup(
         actions.flatMap((a, i) => [
@@ -1213,7 +1308,8 @@ export async function chooseAction(
       );
       return;
     }
-    const { action } = await AlertDialog.show({
+    // TV: the TV's own sheet (lib/tv.tsx).
+    const { action } = await showActions({
       title,
       presentation: "actionSheet",
       actions: [
@@ -1255,7 +1351,7 @@ export async function confirmRemoveDownload(t: DlTarget): Promise<void> {
       : desktop
         ? "The file is deleted from this computer."
         : "It is removed from this device.";
-    const { action } = await AlertDialog.show({
+    const { action } = await showActions({
       title: done ? "Delete this download?" : "Remove from downloads?",
       description: done
         ? `${downloadLabel(e)}. ${where}`
@@ -1462,6 +1558,14 @@ export function DownloadButton(props: {
   onPlay?: (e: DlEntry) => void;
   /** Called before any press is handled (the player keeps its chrome up). */
   onInteract?: () => void;
+  /** TV: false leaves it to the pointer (it sits inside a row the D-pad
+   * focuses as a whole, whose menu has its actions). Default true. */
+  tvFocusable?: boolean;
+  /** TV: its keys while it has the focus, before navigation (`true`
+   * consumes): a row that holds it sends Left back to itself. */
+  tvOnKey?: (k: TvKey) => boolean | void;
+  /** TV: hands out its focusable (a row moves the focus onto it). */
+  tvHandle?: (f: Focusable) => void;
 }) {
   const target = computed(() =>
     typeof props.target === "function" ? props.target() : props.target,
@@ -1481,40 +1585,68 @@ export function DownloadButton(props: {
     },
   };
   let lastTap = 0;
+  // TV: select is the tap, holding select (or the menu key) the menu. Made
+  // with the view (it comes and goes with the target).
+  const focusable = () => {
+    if (props.tvFocusable === false) return undefined;
+    const f = useFocusable({
+      onKey: (k) => props.tvOnKey?.(k),
+      onPress: () => {
+        props.onInteract?.();
+        const t = target();
+        if (t) pressDownload(t, hooks);
+      },
+      onLongPress: () => {
+        props.onInteract?.();
+        const t = target();
+        if (t) void openDownloadMenu(t, undefined, hooks);
+      },
+    });
+    props.tvHandle?.(f);
+    return f;
+  };
   return (
     <If when={canDownload() && target()}>
-      <View
-        role="button"
-        accessibilityLabel={stateLabel(entry())}
-        onPress={(e: { pagePosition?: { x: number; y: number } }) => {
-          const now = Date.now();
-          if (now - lastTap < TAP_GAP_MS) return;
-          lastTap = now;
-          props.onInteract?.();
-          const t = target();
-          if (t) pressDownload(t, hooks, desktop ? e?.pagePosition : undefined);
-        }}
-        onLongPress={
-          desktop
-            ? undefined
-            : () => {
-                props.onInteract?.();
-                const t = target();
-                if (t) void openDownloadMenu(t, undefined, hooks);
-              }
-        }
-        onContextMenu={(e: { pagePosition: { x: number; y: number } }) => {
-          props.onInteract?.();
-          const t = target();
-          if (t) void openDownloadMenu(t, e.pagePosition, hooks);
-        }}
-        class={`cursor-pointer items-center justify-center ${
-          props.compact ? "rounded-md" : "rounded-full"
-        } hover:bg-white/10 active:opacity-60`}
-        style={{ width: hit, height: hit }}
-      >
-        <DownloadMark entry={entry()} size={props.compact ? 18 : s} />
-      </View>
+      {() => {
+        const tv = focusable();
+        return (
+          <View
+            ref={tv?.ref}
+            role="button"
+            accessibilityLabel={stateLabel(entry())}
+            onMouseEnter={tv?.onMouseEnter}
+            onPressIn={tv?.onPressIn}
+            onPress={(e: { pagePosition?: { x: number; y: number } }) => {
+              const now = Date.now();
+              if (now - lastTap < TAP_GAP_MS) return;
+              lastTap = now;
+              props.onInteract?.();
+              const t = target();
+              if (t) pressDownload(t, hooks, desktop ? e?.pagePosition : undefined);
+            }}
+            onLongPress={
+              desktop
+                ? undefined
+                : () => {
+                    props.onInteract?.();
+                    const t = target();
+                    if (t) void openDownloadMenu(t, undefined, hooks);
+                  }
+            }
+            onContextMenu={(e: { pagePosition: { x: number; y: number } }) => {
+              props.onInteract?.();
+              const t = target();
+              if (t) void openDownloadMenu(t, e.pagePosition, hooks);
+            }}
+            class={`cursor-pointer items-center justify-center ${
+              props.compact ? "rounded-md" : "rounded-full"
+            } ${tv?.focused() ? tvFocus.row : "hover:bg-white/10 active:opacity-60"}`}
+            style={{ width: hit, height: hit }}
+          >
+            <DownloadMark entry={entry()} size={props.compact ? 18 : s} />
+          </View>
+        );
+      }}
     </If>
   );
 }

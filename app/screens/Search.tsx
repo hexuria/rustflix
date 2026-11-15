@@ -28,6 +28,18 @@ import { hasKey, isMovie, search, type Media } from "../lib/tmdb";
 import { AnimeCard, Chip, EmptyState, MediaCard, posterGrid } from "../lib/ui";
 import { focusContent } from "../lib/system";
 import { Glyph, icon } from "./PlayerControls";
+import {
+  tvFocus,
+  TvGroup,
+  tvListen,
+  tvListenStop,
+  tvMode,
+  TV_SAFE,
+  useFocusable,
+  voiceAvailable,
+  voiceError,
+  voicePartial,
+} from "../lib/tv";
 
 type Status = "idle" | "searching" | "done" | "error";
 type Kind = "all" | "movie" | "tv" | "anime";
@@ -192,6 +204,18 @@ async function refresh() {
 // "delay": 1500, "keep": true }` opens the Search tab and searches for
 // `q` once the app is up (as `rustflix.opentitle` does for a title page).
 // Removed after one run unless `keep`.
+/** Opens the Search tab on `q`, searched at once ("" just opens it): a
+ * query from outside (the system's search, the remote's search key). */
+export function openSearch(q: string) {
+  selectTab("search");
+  const text = q.trim();
+  if (!text) return;
+  query.set(text);
+  if (timer) clearTimeout(timer);
+  void runNow(text);
+  remember(text);
+}
+
 export async function runOpenSearchTest() {
   let raw: string | null = null;
   try {
@@ -220,12 +244,100 @@ export async function runOpenSearchTest() {
 
 const LENS = `<circle cx="10.5" cy="10.5" r="6.2" fill="none" stroke="#a1a1aa" stroke-width="2"/><path d="M15.2 15.2 20 20" fill="none" stroke="#a1a1aa" stroke-width="2" stroke-linecap="round"/>`;
 
+/** "Clear" over the recent searches. */
+function ClearRecent() {
+  const tv = useFocusable({ onPress: () => saveRecent([]) });
+  return (
+    <View
+      ref={tv.ref}
+      role="button"
+      accessibilityLabel="Clear recent searches"
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
+      onPress={() => saveRecent([])}
+      class={`cursor-pointer rounded-lg active:opacity-60 ${tv.focused() ? tvFocus.row : ""}`}
+      style={{ paddingTop: 6, paddingBottom: 6, paddingLeft: 8, paddingRight: tvMode() ? 8 : 0 }}
+    >
+      <Text class="text-sm font-medium text-primary">Clear</Text>
+    </View>
+  );
+}
+
 const KINDS: { kind: Kind; label: string }[] = [
   { kind: "all", label: "All" },
   { kind: "movie", label: "Movies" },
   { kind: "tv", label: "Shows" },
   { kind: "anime", label: "Anime" },
 ];
+
+const MIC = `<path d="M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>`;
+
+/** TV: search by voice (the system's speech recognizer, the TV's own
+ * microphone): a switch. Select (or a click) turns the listening on; it
+ * stays on through pauses, the words showing in the field as they are
+ * heard. Select again turns it off and searches what was said. Left on, it
+ * searches by itself once the speaker has been silent for a few seconds.
+ * The Search tab opens with the focus on it: typing with a remote is slow. */
+function VoiceButton(props: { onText: (text: string) => void }) {
+  const listening = signal(false);
+  const problem = signal("");
+  let problemTimer: ReturnType<typeof setTimeout> | undefined;
+  // Each start is a run; only the newest one's answer counts.
+  let run = 0;
+  const go = async () => {
+    const mine = ++run;
+    problem.set("");
+    listening.set(true);
+    let t: string | null = null;
+    try {
+      t = await tvListen("Search movies, shows and anime", true);
+    } catch {}
+    if (mine !== run) return;
+    listening.set(false);
+    if (t) {
+      props.onText(t);
+      return;
+    }
+    const e = voiceError();
+    const why = e === 3 ? "Microphone unavailable" : e === 9 ? "Microphone not allowed" : "";
+    if (!why) return;
+    problem.set(why);
+    if (problemTimer) clearTimeout(problemTimer);
+    problemTimer = setTimeout(() => problem.set(""), 4000);
+  };
+  const toggle = () => {
+    if (listening()) tvListenStop();
+    else void go();
+  };
+  const tv = useFocusable({
+    autoFocus: true,
+    onKey: (k) => {
+      if (k.key !== "select") return false;
+      if (k.action === "down" && k.repeat === 0) toggle();
+      return true;
+    },
+  });
+  return (
+    <View
+      ref={tv.ref}
+      role="button"
+      accessibilityLabel="Search by voice"
+      accessibilityState={{ selected: listening() }}
+      onMouseEnter={tv.onMouseEnter}
+      // (The remote's select comes through onKey above; this is the pointer's.)
+      onPress={toggle}
+      class={`cursor-pointer flex-row items-center justify-center gap-2 rounded-full px-4 ${
+        listening() ? "bg-primary" : "bg-white/15 hover:bg-white/25 active:bg-white/30"
+      } ${tv.focused() ? "outline-4 outline-offset-2 outline-white" : ""}`}
+      style={{ height: 52 }}
+    >
+      <Image src={icon(MIC, 24)} style={{ width: 24, height: 24 }} />
+      <Text class="font-semibold text-foreground" style={{ fontSize: 16, lineHeight: 20, numberOfLines: 1 }}>
+        {listening() ? "Listening… OK to search" : problem() || "Voice search"}
+      </Text>
+    </View>
+  );
+}
 
 export function Search() {
   let scroll: ScrollRef | undefined;
@@ -267,10 +379,38 @@ export function Search() {
       void runNow(text);
     } else run(text);
   };
+  // TV: the field is a focusable (select opens the TV's keyboard; up / down
+  // leave it), then the chips, then the results, top to bottom.
+  const tv = tvMode();
+  const fieldTv = useFocusable({
+    onPress: () => {
+      try {
+        mine?.focus();
+      } catch {}
+    },
+  });
   return (
-    <View class="flex-1 gap-3 px-4 pt-4">
+    <View
+      class={tv ? "flex-1 gap-3 pl-4" : "flex-1 gap-3 px-4 pt-4"}
+      style={tv ? { paddingTop: TV_SAFE.top, paddingRight: TV_SAFE.right } : undefined}
+    >
+      {/* TV: voice first, then the field. */}
+      <View class="flex-row items-center gap-3">
+      <If when={tv && voiceAvailable()}>
+        <VoiceButton
+          onText={(t) => {
+            setQuery(t, true);
+            remember(t);
+          }}
+        />
+      </If>
       {/* The field: lens, text, then what is going on at its right end. */}
-      <View class="flex-row items-center gap-2 rounded-xl bg-white/10 pl-3 pr-2" style={{ height: 44 }}>
+      <View
+        ref={fieldTv.ref}
+        onMouseEnter={fieldTv.onMouseEnter}
+        class={`flex-1 flex-row items-center gap-2 rounded-xl pl-3 pr-2 ${fieldTv.focused() ? "bg-white/20 outline-4 outline-offset-2 outline-white" : "bg-white/10"}`}
+        style={{ height: tv ? 52 : 44 }}
+      >
         <Image src={icon(LENS, 20)} style={{ width: 20, height: 20 }} />
         <Input
           ref={(n: { focus(): void }) => {
@@ -278,9 +418,15 @@ export function Search() {
             field = n;
             focusNow();
           }}
-          value={query()}
-          // macOS: the keyboard to the app's view, not a web view.
-          onFocus={focusContent}
+          // While the Voice button listens, the words show here as they are
+          // heard (the search runs on the final ones).
+          value={voicePartial() || query()}
+          // macOS: the keyboard to the app's view, not a web view. TV: the
+          // field takes the remote's focus too (a pointer focused it).
+          onFocus={() => {
+            focusContent();
+            fieldTv.claim();
+          }}
           onChange={({ value }) => setQuery(value)}
           onSubmit={() => {
             setQuery(query(), true);
@@ -290,7 +436,7 @@ export function Search() {
           autoCapitalize="none"
           autoCorrect={false}
           placeholder="Movies, shows, anime"
-          class="flex-1 bg-transparent py-2 text-[15px] text-foreground"
+          class={tv ? "flex-1 bg-transparent py-2 text-[17px] text-foreground" : "flex-1 bg-transparent py-2 text-[15px] text-foreground"}
         />
         <If when={busy()}>
           <View class="items-center justify-center" style={{ width: 32, height: 32 }}>
@@ -298,6 +444,8 @@ export function Search() {
           </View>
         </If>
         <If when={!busy() && query().length > 0}>
+          {/* TV: the pointer's (it is inside the field, which the D-pad
+              focuses as a whole; the keyboard deletes the text). */}
           <View
             role="button"
             accessibilityLabel="Clear search"
@@ -316,35 +464,43 @@ export function Search() {
           </View>
         </If>
       </View>
+      </View>
       <If when={chips().length > 0 && count() > 0}>
         {/* Four chips do not fit a narrow phone: the row scrolls, edge to edge. */}
-        <Scroll horizontal scrollbar={false} style={{ height: 32, marginLeft: -16, marginRight: -16 }}>
-        <View class="flex-row gap-2" style={{ paddingLeft: 16, paddingRight: 16 }}>
-          <Each of={chips()} key={(c: { kind: Kind }) => c.kind}>
-            {(c) => (
-              <Chip
-                size="sm"
-                label={`${c().label} ${countOf(c().kind)}`}
-                selected={kind() === c().kind}
-                onPress={() => {
-                  kind.set(c().kind);
-                  scroll?.scrollTo({ y: 0, animated: false });
-                }}
-              />
-            )}
-          </Each>
+        <Scroll horizontal scrollbar={false} style={{ height: tv ? 48 : 32, marginLeft: -16, marginRight: -16 }}>
+        <View class="flex-row items-center gap-2" style={{ paddingLeft: 16, paddingRight: 16, height: tv ? 48 : undefined }}>
+          <TvGroup>
+            <Each of={chips()} key={(c: { kind: Kind }) => c.kind}>
+              {(c) => (
+                <Chip
+                  size="sm"
+                  label={`${c().label} ${countOf(c().kind)}`}
+                  selected={kind() === c().kind}
+                  onPress={() => {
+                    kind.set(c().kind);
+                    scroll?.scrollTo({ y: 0, animated: false });
+                  }}
+                />
+              )}
+            </Each>
+          </TvGroup>
         </View>
         </Scroll>
       </If>
       <Scroll
         ref={(n: ScrollRef) => (scroll = n)}
         class="flex-1"
+        // TV: the results start inside the scroll view's edge (room for
+        // the focused card's ring at the left, the right and the top).
+        style={tv ? { marginLeft: -16, marginRight: -16 } : undefined}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
-        refreshing={refreshing()}
-        onRefresh={() => void refresh()}
+        // TV: no pull to refresh (no touch).
+        refreshing={tv ? undefined : refreshing()}
+        onRefresh={tv ? undefined : () => void refresh()}
       >
-        <View class="pb-10" onLayout={(e) => gridW.set(e.bounds.size.width)}>
+        <View style={tv ? { paddingLeft: 16, paddingRight: 16, paddingTop: 10 } : undefined}>
+        <View class={tv ? "pb-10 pt-2" : "pb-10"} onLayout={(e) => gridW.set(e.bounds.size.width)}>
           <If when={status() === "idle" && recent().length === 0}>
             <EmptyState
               icon="⌕"
@@ -356,15 +512,7 @@ export function Search() {
             <View class="gap-3 pt-1">
               <View class="flex-row items-center justify-between">
                 <Text class="text-sm font-semibold text-muted-foreground">Recent</Text>
-                <View
-                  role="button"
-                  accessibilityLabel="Clear recent searches"
-                  onPress={() => saveRecent([])}
-                  class="cursor-pointer active:opacity-60"
-                  style={{ paddingTop: 6, paddingBottom: 6, paddingLeft: 8 }}
-                >
-                  <Text class="text-sm font-medium text-primary">Clear</Text>
-                </View>
+                <ClearRecent />
               </View>
               <View class="flex-row flex-wrap gap-2">
                 <Each of={recent()} key={(r: string) => r}>
@@ -417,6 +565,7 @@ export function Search() {
               </View>
             </View>
           </If>
+        </View>
         </View>
       </Scroll>
     </View>

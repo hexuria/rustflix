@@ -278,6 +278,167 @@ after 260 ms; hold for 2× until release; vertical slides for brightness
 mouse clicks, so the double tap is recognised from the taps' timing (all
 phones).
 
+## Android TV / Google TV
+
+The same APK runs on phones and TVs (no flavors, no separate build).
+
+- **Launcher.** `MainActivity` has both the `LAUNCHER` and the
+  `LEANBACK_LAUNCHER` intent filter. The TV launcher's tile is
+  `android:banner` (`res/mipmap-*/banner.png`, 16:9, 320×180 at xhdpi):
+  the icon and the name "rustflix" on the launcher background. Regenerate it
+  with `./android/make-banner.sh` (Python 3 with Pillow) after the icon
+  changes.
+- **Features.** `android.software.leanback`, `android.hardware.touchscreen`,
+  `android.hardware.faketouch` and `android.hardware.wifi` are declared
+  `required="false"`; no permission implies a feature a TV lacks.
+- **TV mode.** The host counts a device as a TV when the UI mode is
+  television or it has `FEATURE_LEANBACK` (NSH reports
+  `platform.idiom === "tv"` from the UI mode alone).
+
+### Remote keys (contract for app/)
+
+NSH's Android views take no key focus, so the app moves its own focus from
+keys the host hands it (`TvRemote.java`):
+
+| Call / event | Data | Answer |
+| --- | --- | --- |
+| `sys.deviceInfo` | — | `{tv, leanback, touch}`: `tv` as above, `leanback` = `FEATURE_LEANBACK`, `touch` = `FEATURE_TOUCHSCREEN` |
+| `sys.keyCapture` | `{on: boolean}` | `{ok: true}` |
+| `sys.tap` | `{x, y}` (dp, from the top left of the focused window) | `{ok: true}` |
+| `sys.key` (event) | `{key, action: "down" \| "up", repeat, editing}` | — |
+| `sys.voice` | `{check: true}`, or `{prompt?, hold?}` to listen (`hold`: stay on through pauses) | `{available}` for a check; `{ok}` once listening started |
+| `sys.voiceStop` | — (ends the listening; what was heard follows as `sys.voiceResult`) | `{ok: true}` |
+| `sys.voiceHold` | `{on: boolean}` (off: end at the next pause) | `{ok: true}` |
+| `sys.voicePartial` (event) | `{text}`: what has been heard so far | — |
+| `sys.voiceResult` (event) | `{text, error}` (`""`: nothing heard; `error`: the `SpeechRecognizer` code when it failed, 3 = the microphone could not be opened, 9 = no permission) | — |
+| `sys.searchKey` | `{key}`: the app's TMDB key, for the search provider | `{ok: true}` |
+| `sys.openRequest` | — | what the launching intent asked to open, once: `{type, id}`, `{search}`, or null |
+| `sys.open` (event) | `{type: "movie" \| "tv", id}` or `{search}` | — |
+
+- **Capture.** On from launch when `tv` is true, off otherwise; the app turns
+  it on or off when it enters or leaves TV mode. While it is on the remote's
+  keys are consumed (neither Android's focus search nor NSH's `keymap` sees
+  them) and sent as `sys.key`, for the press (each auto-repeat too,
+  `repeat` = `KeyEvent.getRepeatCount()`) and the release.
+- **Keys.** `up` `down` `left` `right` (D-pad), `select` (DPAD_CENTER,
+  ENTER, NUMPAD_ENTER, BUTTON_A), `playpause` `play` `pause` `stop`
+  `rewind` `forward` `next` `prev` (MEDIA_*), `menu` (MENU). **Back is
+  never forwarded**: it keeps NSH's path to the app's `back()`.
+- **Every window.** Keys are taken in the window callback, before any view:
+  the activity's (`MainActivity.dispatchKeyEvent`) and each NSH modal
+  Dialog's (the player is one), whose callback `SystemControls` wraps when
+  the dialog opens (any window focus change). A dialog's callback is reached
+  through `DecorView.mWindow` by reflection; where Android refuses that, that
+  dialog's remote keys do nothing.
+- **Text fields.** While an EditText has focus every key is the field's
+  (left/right move the caret, select is Enter), except `up` and `down`:
+  the field loses focus (to the NshView, or the dialog's own decor view) and
+  the keyboard hides, and the key goes out with `editing: true` (its
+  release too).
+- **Focus.** While capture is on no web view can take key focus (the hidden
+  resolver is full screen at opacity 0; the player's page), and a window
+  that gains focus hands it to its NshView / decor view unless a text field
+  has it (not a web view, not a tab of the native tab bar).
+- **`sys.tap`** sends a touch down and, 60 ms later, up at that point of
+  the focused window, through its window callback (for a source's own page
+  in the player: the page still gets touches only while `sys.playerWindow`'s
+  `pageTouches` is on).
+- Pointer ("air mouse") remotes need nothing of their own: their clicks
+  arrive as touches, and their D-pad and select keys as above.
+- **`sys.voice`** listens in the app with `SpeechRecognizer` (no screen
+  of the recognizer's own), through the TV's recognition service where
+  there is one (`com.google.android.katniss`), else the default one. It
+  needs `RECORD_AUDIO`, asked for at the first use (`android.hardware.
+  microphone` is declared not required). With `hold` the recognizer is
+  started again at each pause and what it heard is kept, until
+  `sys.voiceStop`, two silences in a row after something was said, or 60 s.
+  Where no recognition service can be bound it falls back to the
+  recognizer's activity (`RecognizerIntent.ACTION_RECOGNIZE_SPEECH`).
+- **Which microphone.** On the Google TV this was built on (a TCL set,
+  Android 14) the recognizer records from the TV's built-in microphone,
+  which has a hardware privacy switch: off, every attempt ends in error 3.
+  The remote's microphone button is not available to apps there: TCL's
+  window policy hands KEYCODE_ASSIST to the Assistant before key
+  dispatch (before an accessibility service's key filter too), and the
+  Assistant's answers are Google's.
+
+### The system's search
+
+rustflix is a "searchable app" (`res/xml/searchable.xml`,
+`SearchProvider.java`): Android TV's search can ask the provider
+`content://com.hexuria.rustflix.search/search_suggest_query` for titles,
+once the user has turned rustflix on under the TV's **Searchable apps**.
+On the Google TV this was tested on, the system lists rustflix there but the
+remote's microphone search did not use it: its results came from Google's
+servers alone. The provider and both intents below were checked with the
+`adb` commands that follow. The provider searches TMDB's
+movies and series with the app's key, which the interface hands over
+(`sys.searchKey`), so it finds nothing before the app's first launch. A
+picked result opens `MainActivity` with `ACTION_VIEW` and
+`rustflix://title/<movie|tv>/<id>`; a query meant for the app arrives as
+`ACTION_SEARCH`. Both reach the interface as `sys.open` (or
+`sys.openRequest` when they launched the app).
+
+```sh
+adb shell content query --uri content://com.hexuria.rustflix.search/search_suggest_query/dune
+adb shell am start -n com.hexuria.rustflix/.MainActivity -a android.intent.action.VIEW -d rustflix://title/movie/438631
+adb shell am start -n com.hexuria.rustflix/.MainActivity -a android.intent.action.SEARCH --es query "the office"
+```
+
+### The TV interface (app/)
+
+`app/lib/tv.tsx` is the TV layer: TV mode (`platform.idiom`, or
+`sys.deviceInfo`; Storage `rustflix.tv` = "1" / "0" forces it), the focus
+registry and spatial navigation over the `sys.key` events, focus scopes
+(pages, the navigation rail, overlays), the focus highlight, and the TV's
+own action sheet. Every pressable registers with `useFocusable` (or is a
+`TvPressable`). `App.tsx` draws the TV shell (a navigation rail on the
+left in place of the bottom tab bar). In the player, select plays and
+pauses, left / right seek, up / down reach the controls, and the media keys
+work throughout. Search opens on a **Voice search** button where the device
+has a speech recognizer: select turns the listening on (the words show in
+the field as they are heard), select again searches them.
+
+### TV rules
+
+- Landscape only (`SCREEN_ORIENTATION_LANDSCAPE` from launch and in the
+  player; the manifest's `fullUser` is for phones).
+- No picture-in-picture on leaving the app (neither `setAutoEnterEnabled`
+  nor `onUserLeaveHint`), and the player shows no PiP, full-screen or lock
+  button on a TV. The PiP window's title (Android 13+) is the app's name,
+  or an optional `title` string in `sys.pip` / `sys.pipState`.
+- Leaving the app (Home) while the player shows pauses it: the native
+  player directly, the web player through `sys.pipAction {a: "pause"}`;
+  nothing resumes by itself on return.
+- The edge swipe back and "Hide Android's navigation buttons" are inert
+  (`sys.navBar` answers `buttons: false`). Back closes the player even in
+  full screen (full screen changes nothing visible on a TV); no
+  `sys.fullscreen {on: false}` is sent there.
+
+### Sideload and test
+
+Most Google TV sticks and TVs run 32-bit Android: build and install the
+`armeabi-v7a` APK (`adb connect <tv-ip>:5555` after enabling network
+debugging in the TV's developer options):
+
+```sh
+ABIS=armeabi-v7a INSTALL=1 ./android/build.sh
+```
+
+`INSTALL=1` starts `MainActivity`, which serves the TV launcher too. Remote
+keys from the computer:
+
+```sh
+adb shell input keyevent DPAD_DOWN        # DPAD_UP / DPAD_LEFT / DPAD_RIGHT
+adb shell input keyevent DPAD_CENTER      # select
+adb shell input keyevent BACK
+adb shell input keyevent MEDIA_PLAY_PAUSE # MEDIA_REWIND, MEDIA_FAST_FORWARD, MENU
+adb shell input keyevent --longpress DPAD_CENTER
+```
+
+An Android TV emulator image (`system-images;android-34;google-tv;x86` or
+an `android-tv` image) has the same leanback launcher and D-pad.
+
 ## Known limitations
 
 - WebView's default video poster (a grey Android robot) is replaced by a

@@ -28,7 +28,7 @@ import { setDevMode } from "./state";
 // --- Types ------------------------------------------------------------------------
 
 export type Platform = "desktop" | "phone" | "tablet";
-export type Need = "download" | "cache" | "fps" | "devmode" | "keyboard" | "android";
+export type Need = "download" | "cache" | "fps" | "devmode" | "keyboard" | "android" | "touch";
 
 /** The device a list is made for. */
 export interface Ctx {
@@ -45,6 +45,8 @@ export interface Ctx {
   keyboard: boolean;
   /** An Android device (its system navigation bar can be kept away). */
   android: boolean;
+  /** Touch is how it is used (not a TV, which a remote drives). */
+  touch: boolean;
 }
 
 export interface Option {
@@ -272,7 +274,7 @@ export const CATEGORIES: CategoryDef[] = [
       {
         id: "general.android",
         title: "Screen",
-        needs: ["android"],
+        needs: ["android", "touch"],
         rows: [
           {
             id: "general.hideNavButtons",
@@ -581,6 +583,7 @@ export const CATEGORIES: CategoryDef[] = [
     color: "#ff9f0a",
     group: "help",
     platforms: ["phone", "tablet"],
+    needs: ["touch"],
     sections: [
       {
         id: "gestures.main",

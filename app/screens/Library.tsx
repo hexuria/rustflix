@@ -20,6 +20,7 @@ import {
   Section,
   type CardTarget,
 } from "../lib/ui";
+import { tvFocus, tvMode, TV_SAFE, useFocusable } from "../lib/tv";
 
 const refreshing = signal(false);
 
@@ -44,6 +45,62 @@ async function refresh() {
 
 function progressTarget(p: Progress): CardTarget {
   return { type: p.type, id: p.id, title: p.title, poster: p.poster, progress: p };
+}
+
+/** A Continue Watching row: resume (holding select or the menu key on a TV:
+ * the card menu) and its remove button beside it. */
+function WatchingRow(props: { p: Progress }) {
+  const p = () => props.p;
+  const resume = useFocusable({
+    onPress: () => navigate(resumeRoute(p())),
+    onLongPress: () => void openCardMenu(progressTarget(p())),
+  });
+  const remove = useFocusable({ onPress: () => void removeProgressForTitle(p().type, p().id) });
+  return (
+    <View class="flex-row items-center gap-3 rounded-lg bg-muted/50 p-2">
+      <View
+        ref={resume.ref}
+        role="button"
+        accessibilityLabel={`Resume ${p().title}`}
+        onMouseEnter={resume.onMouseEnter}
+        onPressIn={resume.onPressIn}
+        onPress={() => navigate(resumeRoute(p()))}
+        onLongPress={platform.desktop ? undefined : () => void openCardMenu(progressTarget(p()))}
+        onContextMenu={(e) => void openCardMenu(progressTarget(p()), e.pagePosition)}
+        class={`flex-1 cursor-pointer flex-row items-center gap-3 rounded-lg active:opacity-70 ${resume.focused() ? tvFocus.row : ""}`}
+      >
+        <Image src={p().poster} style={{ width: 90, height: 60, borderRadius: 6 }} />
+        <View class="flex-1 gap-0.5">
+          <Text class="text-sm font-semibold text-foreground" style={{ numberOfLines: 1 }}>
+            {p().title}
+          </Text>
+          <Text class={tvMode() ? "text-sm text-muted-foreground" : "text-xs text-muted-foreground"}>
+            {episodeLabel(p()) ? `${episodeLabel(p())} · ` : ""}
+            {fmt(p().position)} / {fmt(p().duration)}
+          </Text>
+          <View class="mt-1 h-1 w-full rounded bg-background">
+            <View
+              class="h-1 rounded bg-primary"
+              style={{
+                width: `${Math.min(100, (p().position / Math.max(1, p().duration)) * 100)}%`,
+              }}
+            />
+          </View>
+        </View>
+      </View>
+      <View
+        ref={remove.ref}
+        role="button"
+        accessibilityLabel="Remove from Continue Watching"
+        onMouseEnter={remove.onMouseEnter}
+        onPressIn={remove.onPressIn}
+        onPress={() => removeProgressForTitle(p().type, p().id)}
+        class={`cursor-pointer rounded-lg p-2 ${remove.focused() ? tvFocus.row : "hover:bg-muted active:bg-muted"}`}
+      >
+        <Text class={tvMode() ? "text-sm text-muted-foreground" : "text-xs text-muted-foreground"}>✕</Text>
+      </View>
+    </View>
+  );
 }
 
 let libraryScroll: ScrollRef | undefined;
@@ -78,10 +135,14 @@ export function Library() {
         libraryScroll = n;
       }}
       class="flex-1"
-      refreshing={refreshing()}
-      onRefresh={() => void refresh()}
+      // TV: no pull to refresh (no touch).
+      refreshing={tvMode() ? undefined : refreshing()}
+      onRefresh={tvMode() ? undefined : () => void refresh()}
     >
-      <View class="gap-8 p-4 pb-10">
+      <View
+        class={tvMode() ? "gap-8 pb-10 pl-4" : "gap-8 p-4 pb-10"}
+        style={tvMode() ? { paddingTop: TV_SAFE.top, paddingRight: TV_SAFE.right } : undefined}
+      >
         <Section title={`Continue Watching (${watching().length})`}>
           <If when={watching().length === 0}>
             <Text class="text-sm text-muted-foreground">
@@ -90,50 +151,7 @@ export function Library() {
           </If>
           <View class="gap-2">
             <Each of={watching()} key={(p) => `${p.type}:${p.id}`}>
-              {(p) => (
-                <View class="flex-row items-center gap-3 rounded-lg bg-muted/50 p-2">
-                  <View
-                    role="button"
-                    accessibilityLabel={`Resume ${p().title}`}
-                    onPress={() => navigate(resumeRoute(p()))}
-                    onLongPress={
-                      platform.desktop ? undefined : () => void openCardMenu(progressTarget(p()))
-                    }
-                    onContextMenu={(e) => void openCardMenu(progressTarget(p()), e.pagePosition)}
-                    class="flex-1 cursor-pointer flex-row items-center gap-3 active:opacity-70"
-                  >
-                    <Image
-                      src={p().poster}
-                      style={{ width: 90, height: 60, borderRadius: 6 }}
-                    />
-                    <View class="flex-1 gap-0.5">
-                      <Text class="text-sm font-semibold text-foreground" style={{ numberOfLines: 1 }}>
-                        {p().title}
-                      </Text>
-                      <Text class="text-xs text-muted-foreground">
-                        {episodeLabel(p()) ? `${episodeLabel(p())} · ` : ""}
-                        {fmt(p().position)} / {fmt(p().duration)}
-                      </Text>
-                      <View class="mt-1 h-1 w-full rounded bg-background">
-                        <View
-                          class="h-1 rounded bg-primary"
-                          style={{
-                            width: `${Math.min(100, (p().position / Math.max(1, p().duration)) * 100)}%`,
-                          }}
-                        />
-                      </View>
-                    </View>
-                  </View>
-                  <View
-                    role="button"
-                    accessibilityLabel="Remove from Continue Watching"
-                    onPress={() => removeProgressForTitle(p().type, p().id)}
-                    class="cursor-pointer rounded-lg p-2 hover:bg-muted active:bg-muted"
-                  >
-                    <Text class="text-xs text-muted-foreground">✕</Text>
-                  </View>
-                </View>
-              )}
+              {(p) => <WatchingRow p={p()} />}
             </Each>
           </View>
         </Section>
@@ -152,7 +170,29 @@ export function Library() {
               rows near the screen exist, however long the list grows.
               The columns fill the width (posterGrid). */}
           <View onLayout={(e) => gridW.set(e.bounds.size.width)}>
-            <If when={gridW() > 0 && items().length > 0}>
+            {/* TV: a plain grid (every card in the D-pad's reach; a list's
+                rows that are not mounted could not be moved to). */}
+            <If when={tvMode() && gridW() > 0 && items().length > 0}>
+              <View class="flex-row flex-wrap" style={{ columnGap: grid().gap, rowGap: 16 }}>
+                <Each of={items()} key={(i: LibraryItem) => `${i.type}:${i.id}`}>
+                  {(item) => (
+                    <PosterCard
+                      target={{
+                        type: item().type,
+                        id: item().id,
+                        title: item().title,
+                        poster: item().poster,
+                        year: item().year,
+                      }}
+                      image={item().poster}
+                      subtitle={`${item().type.toUpperCase()} ${item().year ?? ""}`.trim()}
+                      width={cardW()}
+                    />
+                  )}
+                </Each>
+              </View>
+            </If>
+            <If when={!tvMode() && gridW() > 0 && items().length > 0}>
             <List
               viewport="parent"
               each={items()}

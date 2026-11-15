@@ -6,6 +6,7 @@
 // survives the phone overlay re-mounting.
 
 import { computed, keymap, Scroll, signal, Text, View } from "nsh";
+import { tvFocus, useFocusable } from "../lib/tv";
 import {
   audioHint,
   audioOptions,
@@ -75,13 +76,17 @@ function Row(props: {
   icon?: "sources";
   onPress: () => void;
 }) {
+  // TV: in the D-pad's focus; the popup opens on its checked row.
+  const tv = useFocusable({ onPress: () => props.onPress(), autoFocus: !!props.checked });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.label}
       accessibilityState={{ selected: !!props.checked }}
+      onMouseEnter={tv.onMouseEnter}
       onPress={props.onPress}
-      class={`flex-row items-center gap-2 rounded-lg px-2.5 ${
+      class={`flex-row items-center gap-2 rounded-lg px-2.5 ${tv.focused() ? tvFocus.row : ""} ${
         props.desktop
           ? "h-9 cursor-pointer hover:bg-white/10 active:bg-white/15"
           : "min-h-11 active:bg-white/15"
@@ -125,13 +130,16 @@ function Heading(props: { label: string; first?: boolean }) {
 
 /** A small square-ish control of the bottom row (≥ 44 pt on the phone). */
 function Chip(props: { label: string; on?: boolean; desktop?: boolean; a11y?: string; onPress: () => void }) {
+  const tv = useFocusable({ onPress: () => props.onPress() });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.a11y ?? props.label}
       accessibilityState={{ selected: !!props.on }}
+      onMouseEnter={tv.onMouseEnter}
       onPress={props.onPress}
-      class={`items-center justify-center rounded-md px-2 ${
+      class={`items-center justify-center rounded-md px-2 ${tv.focused() ? tvFocus.row : ""} ${
         props.desktop
           ? "h-8 min-w-8 cursor-pointer hover:bg-white/15 active:bg-white/20"
           : "h-11 min-w-11 active:bg-white/20"

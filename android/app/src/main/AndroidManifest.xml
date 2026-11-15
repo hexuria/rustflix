@@ -9,6 +9,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Search by voice on a TV (sys.voice): the app listens through the
+         system's speech recognizer; asked for at the first use. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- One APK for phones and TVs (Android TV / Google TV): nothing a TV
+         lacks is required. A TV has no touch screen (a remote, maybe a
+         pointer), may be on Ethernet, and runs the leanback launcher. -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.faketouch" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <!-- RECORD_AUDIO implies a microphone: not required (TVs, and phones use
+         their keyboard's dictation). -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <!-- NSH's text-selection menu offers other apps' text actions (as nsh.aar declares). -->
     <queries>
@@ -16,12 +30,22 @@
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
+        <!-- Search by voice (sys.voice): is there a speech recognizer to ask?
+             (Google TV's own voice input by name: TvRemote.java.) -->
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <package android:name="com.google.android.katniss" />
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
     </queries>
 
     <application
         android:label="rustflix"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
+        android:banner="@mipmap/banner"
         android:theme="@style/Theme.Rustflix"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -42,7 +66,32 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- The TV launcher's row of apps (its tile is android:banner). -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- The system's search (xml/searchable.xml): a query for the
+                 app (the TV remote's microphone while it shows) ... -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEARCH" />
+            </intent-filter>
+            <!-- ... and a result picked there: rustflix://title/<movie|tv>/<id>. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="rustflix" android:host="title" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.searchable"
+                android:resource="@xml/searchable" />
         </activity>
+
+        <!-- The system's search asks this for rustflix's titles (xml/searchable.xml). -->
+        <provider
+            android:name=".SearchProvider"
+            android:authorities="com.hexuria.rustflix.search"
+            android:exported="true" />
 
         <service
             android:name=".DownloadService"

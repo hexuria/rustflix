@@ -1,11 +1,11 @@
 // rustflix app shell: sidebar navigation + the routed screen.
 // The whole UI is TSX; the GPUI host only provides the window.
 
-import { computed, effect, mount, platform, safeAreaInsets, signal, Storage, Text, untracked, View } from "nsh";
+import { computed, effect, host, Image, mount, platform, safeAreaInsets, signal, Storage, Text, untracked, View } from "nsh";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { createNavStack, Dialog, NavPage, NavStack, Toast, ToastManager, ToastStack } from "nsh/base";
 import { BackHandler, TabBar } from "nsh/mobile";
-import { hasKey, loadKey } from "./lib/tmdb";
+import { currentKey, hasKey, loadKey } from "./lib/tmdb";
 import { setNavButtonsHidden, setPlayerWindow } from "./lib/system";
 import {
   canGoBack,
@@ -14,6 +14,7 @@ import {
   exitPlayer,
   goBack,
   goForward,
+  goTitle,
   navigate,
   pagePopped,
   route,
@@ -60,7 +61,7 @@ import { Player } from "./screens/Player";
 import { ResolverHost } from "./screens/ResolverHost";
 import { NativePlayerDebug, runNativeTest } from "./screens/NativePlayerDebug";
 import { runResolveTest } from "./lib/resolver";
-import { focusSearchField, runOpenSearchTest, Search } from "./screens/Search";
+import { focusSearchField, openSearch, runOpenSearchTest, Search } from "./screens/Search";
 import {
   Settings as SettingsScreen,
   SettingsPage,
@@ -71,8 +72,29 @@ import { Setup } from "./screens/Setup";
 import { runOpenTitleTest, scrollTitleTo, Title } from "./screens/Title";
 import { HeroLayer } from "./lib/hero";
 import {
+  CONTROL_INK,
+  enterPage,
+  initTv,
+  installTv,
+  RAIL_W,
+  runTvBack,
+  setRailKey,
+  shellFocused,
+  tvFocus,
+  TvGroup,
+  tvMode,
+  TvPage,
+  tvPointerMoved,
+  TvScope,
+  TvSheetHost,
+  TvShellScope,
+  TV_SAFE,
+  useFocusable,
+} from "./lib/tv";
+import {
   episodeLine,
   Glyph,
+  icon,
   playerDlTarget,
   titleLine,
   type IconName,
@@ -391,10 +413,13 @@ function TabPage(props: { name: TabName; route: Route; children: any }) {
       onDismiss={() => pagePopped(props.route)}
     >
       {/* Below the status bar: the shell no longer pads the stack, so
-          pages that want to reach under it (the title page) can. */}
-      <View class="flex-1 bg-background" style={{ paddingTop: "env(safe-area-inset-top)" }}>
-        {props.children}
-      </View>
+          pages that want to reach under it (the title page) can. TV: the
+          page is a focus scope of its own (lib/tv.tsx). */}
+      <TvPage route={props.route}>
+        <View class="flex-1 bg-background" style={{ paddingTop: "env(safe-area-inset-top)" }}>
+          {props.children}
+        </View>
+      </TvPage>
     </NavPage>
   );
 }
@@ -435,18 +460,28 @@ function renderPage(r: Route) {
       // Phones and tablets in portrait: one Settings category, with the
       // system header's back (screens/settings/index.tsx).
       return (
-        <NavPage title={settingsPageTitle(r.page)} headerClass={HEADER_CLASS} onDismiss={() => pagePopped(r)}>
-          <View class="flex-1 bg-background">
-            <SettingsPage page={r.page} />
-          </View>
+        <NavPage
+          title={settingsPageTitle(r.page)}
+          headerClass={HEADER_CLASS}
+          // TV: no system header; the remote's Back leaves the page.
+          headerVisible={!tvMode()}
+          onDismiss={() => pagePopped(r)}
+        >
+          <TvPage route={r}>
+            <View class="flex-1 bg-background">
+              <SettingsPage page={r.page} />
+            </View>
+          </TvPage>
         </NavPage>
       );
     case "setup":
       return (
-        <NavPage title="TMDB key" headerClass={HEADER_CLASS} onDismiss={() => pagePopped(r)}>
-          <View class="flex-1 bg-background">
-            <Setup />
-          </View>
+        <NavPage title="TMDB key" headerClass={HEADER_CLASS} headerVisible={!tvMode()} onDismiss={() => pagePopped(r)}>
+          <TvPage route={r}>
+            <View class="flex-1 bg-background">
+              <Setup />
+            </View>
+          </TvPage>
         </NavPage>
       );
     case "title":
@@ -455,17 +490,21 @@ function renderPage(r: Route) {
         // the screen (its image runs under the status bar and the floating
         // back button); the platform's own push and pop. Desktop: a fade,
         // with the page's content veiled and the card's poster flying into
-        // its slot (screens/Title.tsx, lib/hero.tsx).
+        // its slot (screens/Title.tsx, lib/hero.tsx). TV: no header at all
+        // (the remote's Back leaves the page).
         <NavPage
           title=""
           headerClass={HEADER_CLASS}
           headerTransparent={!platform.desktop}
+          headerVisible={!tvMode()}
           animation={platform.desktop ? "fade" : undefined}
           onDismiss={() => pagePopped(r)}
         >
-          <View class="flex-1 bg-background">
-            <Title route={r} />
-          </View>
+          <TvPage route={r}>
+            <View class="flex-1 bg-background">
+              <Title route={r} />
+            </View>
+          </TvPage>
         </NavPage>
       );
     default:
@@ -602,6 +641,17 @@ function MobileShell() {
           upright it is the portrait player, turned it is the landscape
           one; the full screen button is AVKit's, which goes landscape. */}
       <If when={isPlayer()}>
+        <PlayerDialog />
+      </If>
+    </View>
+  );
+}
+
+/** The phone and TV player: a full-screen dialog over the shell (mounted
+ * while it shows). TV: the player is an overlay scope of the remote's
+ * focus (lib/tv.tsx), so the D-pad stays in it. */
+function PlayerDialog() {
+  return (
         <Dialog
           open
           class="absolute inset-0 bg-black"
@@ -628,11 +678,150 @@ function MobileShell() {
             if (!closePlayerPopups()) exitPlayer();
           }}
         >
-          <Player />
-          <DialogToasts />
+          <TvScope>
+            <Player />
+            <DialogToasts />
+          </TvScope>
         </Dialog>
+  );
+}
+
+// --- TV ------------------------------------------------------------------------------
+//
+// The TV shell (lib/tv.tsx's TV mode): the app's own navigation rail on the
+// left in place of the system tab bar, its items ordinary focusables in the
+// shell's focus scope: Left from a page's leftmost item comes into it (on
+// the tab shown), up / down move in it, select picks the tab and goes into
+// its page, Right goes back into the page where it was left. Closed, it is
+// a column of icons (the tab shown marked); while it has the focus (or the
+// pointer is over it) it widens over the page with the labels. Pages start
+// right of it; the player is the phone's full-screen dialog (the desktop's
+// inline player when TV mode is forced on there).
+
+const RAIL_STROKE = `fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"`;
+const RAIL_ICONS: Record<TabName, string> = {
+  home: `<path d="M4 10.8 12 4.5l8 6.3V19.5h-5v-5.5h-6v5.5H4z" ${RAIL_STROKE}/>`,
+  search: `<circle cx="10.5" cy="10.5" r="6.2" ${RAIL_STROKE}/><path d="M15.3 15.3 20 20" ${RAIL_STROKE}/>`,
+  library: `<path d="M6.5 4h11v16l-5.5-4-5.5 4z" ${RAIL_STROKE}/>`,
+  downloads: `<path d="M12 4v10.5m0 0-4-4m4 4 4-4" ${RAIL_STROKE}/><path d="M5 19h14" ${RAIL_STROKE}/>`,
+  settings: `<circle cx="12" cy="12" r="3.3" ${RAIL_STROKE}/><path d="M12 3v2.6M12 18.4V21M3 12h2.6M18.4 12H21M5.6 5.6l1.9 1.9M16.5 16.5l1.9 1.9M5.6 18.4l1.9-1.9M16.5 7.5l1.9-1.9" ${RAIL_STROKE}/>`,
+};
+
+/** The rail's width while open. */
+const RAIL_OPEN_W = 232;
+
+function RailItem(props: { tab: TabName; label: string; open: boolean }) {
+  const shown = () => currentTab() === props.tab;
+  const go = () => {
+    selectTab(props.tab);
+    enterPage();
+  };
+  const tv = useFocusable({ key: () => `tab:${props.tab}`, onPress: go });
+  const ink = () => (tv.focused() ? CONTROL_INK : shown() ? "#ffffff" : "#a1a1aa");
+  return (
+    <View
+      ref={tv.ref}
+      role="tab"
+      accessibilityLabel={props.label}
+      accessibilityState={{ selected: shown() }}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
+      onPress={go}
+      class={`h-12 cursor-pointer flex-row items-center gap-4 rounded-full px-3 ${tvFocus.motion} ${
+        tv.focused() ? tvFocus.control : shown() ? "bg-white/10" : "hover:bg-white/10 active:bg-white/15"
+      }`}
+      style={{ alignSelf: props.open ? "stretch" : "flex-start" }}
+    >
+      <Image src={icon(RAIL_ICONS[props.tab].split("#fff").join(ink()), 24)} style={{ width: 24, height: 24 }} />
+      <If when={props.open}>
+        <Text
+          class={`font-semibold ${tv.focused() ? tvFocus.controlText : shown() ? "text-foreground" : "text-muted-foreground"}`}
+          style={{ fontSize: 17, lineHeight: 22, numberOfLines: 1 }}
+        >
+          {props.label}
+        </Text>
+      </If>
+      {/* The tab shown, while the rail is closed: a red mark beside it. */}
+      <If when={shown() && !props.open}>
+        <View class="absolute rounded-full bg-primary" style={{ left: -10, top: 18, width: 4, height: 12 }} />
       </If>
     </View>
+  );
+}
+
+function TvRail() {
+  const hovered = signal(false);
+  const open = computed(() => shellFocused() || hovered());
+  const tabs = computed(() => TABS.filter((t) => t.route !== "downloads" || canDownload()));
+  // Left from a page lands on the tab shown.
+  setRailKey(() => `tab:${currentTab()}`);
+  return (
+    <View
+      class={open() ? "absolute bottom-0 left-0 top-0 border-r border-border bg-background" : "absolute bottom-0 left-0 top-0 bg-background"}
+      onMouseEnter={() => hovered.set(true)}
+      onMouseLeave={() => hovered.set(false)}
+      style={{ width: open() ? RAIL_OPEN_W : RAIL_W, zIndex: 10 }}
+    >
+      <View
+        class="flex-1 gap-2"
+        style={{ paddingLeft: 16, paddingRight: 16, paddingTop: TV_SAFE.top + 56 }}
+      >
+        <TvShellScope>
+          <TvGroup axis="column">
+            <Each of={tabs()}>
+              {(t) => <RailItem tab={t().route} label={t().title} open={open()} />}
+            </Each>
+          </TvGroup>
+        </TvShellScope>
+      </View>
+    </View>
+  );
+}
+
+function TvShell() {
+  // Android: the player's window (landscape, immersive, screen on) while it
+  // shows, as on phones.
+  if (platform.os === "android") {
+    effect(() => setPlayerWindow(isPlayer(), playerPhase() === "blind"));
+  }
+  return (
+    // Any pointer movement hides the focus highlight (lib/tv.tsx).
+    <View class="flex-1 bg-background" onMouseMove={tvPointerMoved}>
+      <View class="flex-1" style={{ paddingLeft: RAIL_W }}>
+        <Pages />
+        <ToastLayer bottom={TV_SAFE.bottom} />
+      </View>
+      <TvRail />
+      <If when={platform.desktop}>
+        <InlinePlayer />
+      </If>
+      <If when={!platform.desktop && isPlayer()}>
+        <PlayerDialog />
+      </If>
+      {/* The TV's menus and confirmations (lib/tv.tsx tvAsk). */}
+      <TvSheetHost />
+    </View>
+  );
+}
+
+/** The desktop's player, in place over the shell. */
+function InlinePlayer() {
+  return (
+    <If when={playerMounted()}>
+      <View
+        class="absolute inset-0 bg-black"
+        accessibilityElementsHidden={!isPlayer()}
+        style={{
+          opacity: isPlayer() ? 1 : 0,
+          pointerEvents: isPlayer() ? "auto" : "none",
+        }}
+      >
+        {/* TV mode forced on: the remote's scope while it shows. */}
+        <TvScope active={() => isPlayer()}>
+          <Player />
+        </TvScope>
+      </View>
+    </If>
   );
 }
 
@@ -643,6 +832,7 @@ function Shell() {
   // whole shell): removing it on open re-laid out every page at the new
   // width (~320 frame updates per open, then again on close).
   const tab = (name: TabName) => currentTab() === name;
+  if (untracked(tvMode)) return <TvShell />;
   if (!platform.desktop) return <MobileShell />;
   return (
     <View class="flex-1 bg-background">
@@ -682,18 +872,7 @@ function Shell() {
             by opacity between plays (not drawn, its web view's native view
             hidden by NSH, no hit testing), so opening a play mounts almost
             nothing and never makes a web view (screens/Player.tsx). */}
-        <If when={playerMounted()}>
-          <View
-            class="absolute inset-0 bg-black"
-            accessibilityElementsHidden={!isPlayer()}
-            style={{
-              opacity: isPlayer() ? 1 : 0,
-              pointerEvents: isPlayer() ? "auto" : "none",
-            }}
-          >
-            <Player />
-          </View>
-        </If>
+        <InlinePlayer />
     </View>
   );
 }
@@ -706,7 +885,9 @@ const settle = (load: () => unknown) =>
   Promise.resolve()
     .then(load)
     .catch(() => {});
-void Promise.all([settle(loadKey), settle(loadLibrary), settle(loadDownloads)]).then(async () => {
+// TV mode (lib/tv.tsx) is decided before the first screen too: it picks
+// the shell.
+void Promise.all([settle(loadKey), settle(loadLibrary), settle(loadDownloads), settle(initTv)]).then(async () => {
   ready.set(true);
   // The other tabs' stacks, once the first screen has settled.
   setTimeout(() => premountTabs(600), 2500);
@@ -730,6 +911,8 @@ void Promise.all([settle(loadKey), settle(loadLibrary), settle(loadDownloads)]).
   // (screens/Title.tsx `runOpenTitleTest`).
   void runOpenTitleTest().catch(() => {});
   void runOpenSearchTest().catch(() => {});
+  // Launched from the system's search (Android): its result or query.
+  takeOpenRequest();
   // Spike: `rustflix.nativetest` plays a resolved stream in the app's own
   // player through the local proxy (screens/NativePlayerDebug.tsx; needs
   // `rustflix.nativeplayer` = "1"; removed after one run).
@@ -774,7 +957,71 @@ function back() {
   else goBack();
 }
 
+/** The remote's Back on a TV, when no dialog took it: an overlay or a
+ * screen's own (lib/tv.tsx `runTvBack`), else the page on top of the tab
+ * goes, else Home, else the app leaves (Android TV wants Back to reach the
+ * home screen in the end). */
+function tvBack(): boolean {
+  if (runTvBack()) return true;
+  if (route().name === "player") {
+    back();
+    return true;
+  }
+  const stack = tabStack(currentTab());
+  if (stack.length > 1) {
+    pagePopped(stack[stack.length - 1]);
+    return true;
+  }
+  if (currentTab() !== "home") {
+    selectTab("home");
+    return true;
+  }
+  BackHandler.exitApp();
+  return true;
+}
+
+// The system's search on Android (SearchProvider.java; on a TV the remote's
+// microphone and the home screen's search): the host searches TMDB with the
+// app's key (`sys.searchKey`), and what the user picks or asks for there
+// comes back as `sys.open` (`sys.openRequest` when it launched the app):
+// `{type, id}` opens that title, `{search}` the Search tab on those words.
+let androidHost = false;
+try {
+  androidHost = platform.os === "android" && host.available();
+} catch {}
+
+function openFromSystem(d: unknown) {
+  const o = d as { type?: unknown; id?: unknown; search?: unknown } | null;
+  if (!o || typeof o !== "object") return;
+  if (untracked(isPlayer)) exitPlayer();
+  if ((o.type === "movie" || o.type === "tv") && typeof o.id === "number" && o.id > 0) goTitle(o.type, o.id);
+  else if (typeof o.search === "string") openSearch(o.search);
+}
+
+function takeOpenRequest() {
+  if (!androidHost) return;
+  void Promise.resolve(host.call("sys.openRequest", {} as never))
+    .then((d) => {
+      if (d) setTimeout(() => openFromSystem(d), 800);
+    })
+    .catch(() => {});
+}
+
+function installSystemSearch() {
+  if (!androidHost) return;
+  try {
+    host.on("sys.open", openFromSystem);
+  } catch {}
+  effect(() => {
+    const key = currentKey();
+    void Promise.resolve(host.call("sys.searchKey", { key } as never)).catch(() => {});
+  });
+}
+
 export function App() {
+  // TV: the remote's key capture, its focus following the screens.
+  installTv();
+  installSystemSearch();
   // The first play mounts the player screen if idle has not yet.
   effect(() => {
     if (isPlayer() && !untracked(playerMounted)) playerMounted.set(true);
@@ -875,6 +1122,13 @@ export function App() {
       back();
       return true;
     });
+  });
+  // TV (Android): the remote's Back goes through the app (`tvBack`): the
+  // stacks of the tabs not shown stay mounted, and must never be the ones
+  // a back press pops.
+  effect(() => {
+    if (platform.desktop || !tvMode()) return;
+    BackHandler.on("press", () => tvBack());
   });
 
   return (

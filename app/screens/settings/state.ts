@@ -50,6 +50,10 @@ void Storage.getItem("rustflix.settingslayout")
   .then((v) => forcedIdiom.set(v === "tablet" || v === "phone" ? v : ""))
   .catch(() => {});
 
+/** The TV interface runs (lib/tv.tsx `tvMode`; Settings sets it when it
+ * mounts): the split layout, sized for a TV, and no touch-only rows. */
+export const onTv = signal(false);
+
 /** A touch device with a tablet's screen (iPad, an Android tablet). */
 export const isTablet = computed(() => {
   if (platform.desktop) return false;
@@ -67,14 +71,14 @@ export const isPhone = computed(() => !platform.desktop && !isTablet());
  * landscape at least ~700 pt wide. Else a list that pushes one page per
  * category (phones, tablets in portrait). Follows rotation. */
 export const splitLayout = computed(() => {
-  if (platform.desktop) return true;
+  if (platform.desktop || onTv()) return true;
   if (!isTablet()) return false;
   const w = windowSize();
   return w.width >= 700 && w.width > w.height;
 });
 
 /** Rows put their control under the label (phones, narrow windows). */
-export const stackedRows = computed(() => !platform.desktop && windowSize().width < 600);
+export const stackedRows = computed(() => !platform.desktop && !onTv() && windowSize().width < 600);
 
 // --- iPad hardware keyboard ----------------------------------------------------------
 

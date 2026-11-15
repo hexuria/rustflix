@@ -51,6 +51,7 @@ import {
   type ControlIcon,
 } from "../lib/ui";
 import { Glyph, icon, progressRing, Spinner } from "./PlayerControls";
+import { showActions, tvFocus, tvMode, TV_SAFE, useFocusable } from "../lib/tv";
 
 const desktop = platform.desktop;
 
@@ -360,7 +361,8 @@ async function openRowSheet(e: DlEntry) {
   }
   sheetOpen = true;
   try {
-    const { action } = await AlertDialog.show({
+    // TV: the TV's own sheet (lib/tv.tsx).
+    const { action } = await showActions({
       title: rowTitle(e),
       description: detailOf(e) || undefined,
       presentation: desktop ? undefined : "actionSheet",
@@ -398,19 +400,26 @@ function SectionHeader(props: { text: string; count: number; action?: { label: s
         {`${props.text} · ${props.count}`}
       </Text>
       <If when={props.action}>
-        {(a) => (
-          <View
-            role="button"
-            accessibilityLabel={a().label}
-            onPress={a().onPress}
-            class="cursor-pointer justify-center active:opacity-60"
-            style={{ height: 44 }}
-          >
-            <Text class="font-semibold text-primary" style={{ fontSize: 14, lineHeight: 18 }}>
-              {a().label}
-            </Text>
-          </View>
-        )}
+        {(a) => {
+          // TV: made with the view (the action comes and goes).
+          const tv = useFocusable({ onPress: () => a().onPress() });
+          return (
+            <View
+              ref={tv.ref}
+              role="button"
+              accessibilityLabel={a().label}
+              onMouseEnter={tv.onMouseEnter}
+              onPressIn={tv.onPressIn}
+              onPress={a().onPress}
+              class={`cursor-pointer justify-center rounded-lg active:opacity-60 ${tv.focused() ? tvFocus.row : ""}`}
+              style={{ height: 44, paddingLeft: tvMode() ? 10 : 0, paddingRight: tvMode() ? 10 : 0 }}
+            >
+              <Text class="font-semibold text-primary" style={{ fontSize: 14, lineHeight: 18 }}>
+                {a().label}
+              </Text>
+            </View>
+          );
+        }}
       </If>
     </View>
   );
@@ -495,14 +504,23 @@ function Row(props: { e: DlEntry; inGroup?: boolean }) {
     const cur = live(x);
     if (x.state === "error" && cur) retryDownload(cur.dlId);
   };
+  const press = () => (e().state === "done" && !fixture() ? playDownloadOf(e()) : void openRowSheet(e()));
+  // TV: the row is one focusable (its trailing control is the pointer's:
+  // a press on the row offers the same actions; holding select, the menu).
+  const tv = useFocusable({ onPress: press, onLongPress: () => rowMenu(e()) });
   return (
     <View
+      ref={tv.ref}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       role="button"
       accessibilityLabel={`${[showLine(e(), props.inGroup), rowTitle(e(), props.inGroup)].filter(Boolean).join(", ")}, ${status().text}`}
-      onPress={() => (e().state === "done" && !fixture() ? playDownloadOf(e()) : void openRowSheet(e()))}
+      onPress={press}
       onLongPress={desktop ? undefined : () => rowMenu(e())}
       onContextMenu={(ev: { pagePosition: { x: number; y: number } }) => rowMenu(e(), ev.pagePosition)}
-      class="cursor-pointer flex-row items-center gap-3 border-b border-white/5 hover:bg-white/5 active:bg-white/10"
+      class={`cursor-pointer flex-row items-center gap-3 border-b border-white/5 ${
+        tv.focused() ? tvFocus.row : "hover:bg-white/5 active:bg-white/10"
+      }`}
       style={{
         marginLeft: -GUTTER,
         marginRight: -GUTTER,
@@ -515,14 +533,14 @@ function Row(props: { e: DlEntry; inGroup?: boolean }) {
       <Thumb e={e()} />
       <View class="flex-1 gap-1">
         <If when={showLine(e(), props.inGroup)}>
-          <Text class={MUTED} style={{ fontSize: 12, lineHeight: 16, numberOfLines: 1 }}>
+          <Text class={MUTED} style={{ fontSize: tvMode() ? 14 : 12, lineHeight: tvMode() ? 18 : 16, numberOfLines: 1 }}>
             {showLine(e(), props.inGroup)}
           </Text>
         </If>
         <Text class="font-semibold text-foreground" style={{ fontSize: 15, lineHeight: 20, numberOfLines: 2 }}>
           {rowTitle(e(), props.inGroup)}
         </Text>
-        <Text class={status().cls} style={{ fontSize: 13, lineHeight: 18, numberOfLines: 2 }}>
+        <Text class={status().cls} style={{ fontSize: tvMode() ? 14 : 13, lineHeight: 18, numberOfLines: 2 }}>
           {status().text}
         </Text>
       </View>
@@ -585,13 +603,19 @@ function GroupRow(props: { g: Group }) {
     if (g().bytes > 0) parts.push(formatBytes(g().bytes));
     return parts.join(" · ");
   });
+  const tv = useFocusable({ onPress: () => toggleGroup(g().key) });
   return (
     <View>
       <View
+        ref={tv.ref}
         role="button"
         accessibilityLabel={`${g().title}, ${sub()}`}
+        onMouseEnter={tv.onMouseEnter}
+        onPressIn={tv.onPressIn}
         onPress={() => toggleGroup(g().key)}
-        class="cursor-pointer flex-row items-center gap-3 border-b border-white/5 hover:bg-white/5 active:bg-white/10"
+        class={`cursor-pointer flex-row items-center gap-3 border-b border-white/5 ${
+          tv.focused() ? tvFocus.row : "hover:bg-white/5 active:bg-white/10"
+        }`}
         style={{
           marginLeft: -GUTTER,
           marginRight: -GUTTER,
@@ -606,7 +630,7 @@ function GroupRow(props: { g: Group }) {
           <Text class="font-semibold text-foreground" style={{ fontSize: 15, lineHeight: 20, numberOfLines: 2 }}>
             {g().title}
           </Text>
-          <Text class={MUTED} style={{ fontSize: 13, lineHeight: 18 }}>
+          <Text class={MUTED} style={{ fontSize: tvMode() ? 14 : 13, lineHeight: 18 }}>
             {sub()}
           </Text>
         </View>
@@ -631,7 +655,7 @@ async function deleteWatched(n: number) {
   if (deletingWatched) return;
   deletingWatched = true;
   try {
-    const { action } = await AlertDialog.show({
+    const { action } = await showActions({
       title: n === 1 ? "Delete 1 watched download?" : `Delete ${n} watched downloads?`,
       description: platform.os === "macos"
         ? "Downloads you have watched to the end. The files move to the Trash."
@@ -706,17 +730,28 @@ export function Downloads() {
   });
 
   return (
-    <Scroll class="flex-1" refreshing={refreshing()} onRefresh={() => void refresh()}>
+    // TV: no pull to refresh (no touch); inside the overscan-safe area.
+    <Scroll
+      class="flex-1"
+      refreshing={tvMode() ? undefined : refreshing()}
+      onRefresh={tvMode() ? undefined : () => void refresh()}
+    >
       <View
         class="w-full self-center"
-        style={{ maxWidth: 900, paddingLeft: GUTTER, paddingRight: GUTTER, paddingTop: 12, paddingBottom: 40 }}
+        style={{
+          maxWidth: 900,
+          paddingLeft: GUTTER,
+          paddingRight: tvMode() ? TV_SAFE.right : GUTTER,
+          paddingTop: tvMode() ? TV_SAFE.top : 12,
+          paddingBottom: 40,
+        }}
       >
         <View class="gap-1">
           <Text class="font-extrabold text-foreground" style={{ fontSize: 28, lineHeight: 34 }}>
             Downloads
           </Text>
           <If when={canDownload() && space()}>
-            <Text class={MUTED} style={{ fontSize: 13, lineHeight: 18 }}>
+            <Text class={MUTED} style={{ fontSize: tvMode() ? 14 : 13, lineHeight: 18 }}>
               {space()}
             </Text>
           </If>
@@ -734,6 +769,18 @@ export function Downloads() {
             title="No downloads yet"
             body="Use the download button on a movie, an episode or in the player. Downloads play here without the internet."
           />
+          {/* How much room there is, before anything is downloaded. */}
+          <If when={downloadSpace()}>
+            {(s) => (
+              <View class="items-center pt-3">
+                <View class="rounded-full bg-white/10 px-5 py-2.5">
+                  <Text class="font-semibold text-foreground" style={{ fontSize: tvMode() ? 17 : 14, lineHeight: 22 }}>
+                    {`${formatBytes(s().free)} free on this device`}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </If>
         </If>
 
         <If when={active().length > 0}>

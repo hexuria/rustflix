@@ -22,7 +22,12 @@ import com.longbridge.nsh.NshView;
  *   <li>{@code dl.*} — offline downloads ({@link Downloads}: the Rust
  *       downloader of src/dl over JNI, {@link DownloadService} in the
  *       background)
+ *   <li>{@code sys.deviceInfo / keyCapture / tap} and the {@code sys.key}
+ *       event — the TV remote ({@link TvRemote})
  * </ul>
+ *
+ * <p>One APK for phones and TVs (the manifest's leanback launcher entry and
+ * banner); on a TV the activity stays landscape.
  */
 public final class MainActivity extends Activity {
     static final String TAG = "rustflix";
@@ -33,20 +38,24 @@ public final class MainActivity extends Activity {
     private Downloads downloads;
     private Pip pip;
     private EdgeBack edgeBack;
+    private TvRemote remote;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        remote = new TvRemote(this);
+        // A TV is landscape, whatever the manifest's fullUser lets phones do.
+        if (remote.tv) setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         edgeToEdge();
         // Before any view exists: the navigation buttons are asked away
         // ahead of the window's first frame, so they do not show and then
         // slide out.
         sys = new SystemControls(this);
         sys.reapply();
-        // Swipe from the left edge to go back (phones with the button bar).
-        // At a tab's first page there is nothing to go back to: it does
-        // nothing there, it never leaves the app.
-        edgeBack = new EdgeBack(getWindow().getDecorView(), sys::buttonNavigation, () -> {
+        // Swipe from the left edge to go back (phones with the button bar;
+        // not on a TV). At a tab's first page there is nothing to go back
+        // to: it does nothing there, it never leaves the app.
+        edgeBack = new EdgeBack(getWindow().getDecorView(), sys::edgeBack, () -> {
             if (nsh != null) nsh.handleBack();
         });
 
@@ -80,7 +89,10 @@ public final class MainActivity extends Activity {
         pip = new Pip(this);
         pip.register(nsh);
         sys.pip = pip;
+        sys.remote = remote;
+        remote.onCapture = sys::wrapDialogs;
         sys.register(nsh);
+        remote.register(nsh);
         new CacheControls(this).register(nsh);
         perf = new PerfMonitor(this);
         perf.register(nsh);
@@ -94,6 +106,8 @@ public final class MainActivity extends Activity {
 
         nsh.loadAssetBundle("nsh");
         if (DownloadService.ACTION_OPEN.equals(getIntent().getAction())) downloads.openTab();
+        // Launched from the system's search: a result or a query to open.
+        remote.open(getIntent(), true);
     }
 
     /** A download notification was tapped while the app runs. */
@@ -102,6 +116,15 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (downloads != null && DownloadService.ACTION_OPEN.equals(intent.getAction())) downloads.openTab();
+        if (remote != null) remote.open(intent, false);
+    }
+
+    /** The search key (a keyboard's, some remotes'): the app's own search. */
+    @Override
+    public boolean onSearchRequested() {
+        if (nsh == null) return false;
+        nsh.send("sys.open", java.util.Collections.singletonMap("search", ""));
+        return true;
     }
 
     /** Draw behind the status and navigation bars; the app pads itself with
@@ -143,6 +166,30 @@ public final class MainActivity extends Activity {
             sys.reapply();
             if (hasFocus) sys.focusGained();
         }
+        if (hasFocus && remote != null) remote.settleFocus(getWindow().getDecorView());
+    }
+
+    /** The TV remote's keys, while captured, go to the app ({@code sys.key})
+     * before any view of this window sees them, whichever has focus. The
+     * player's and the other dialogs' windows: {@link SystemControls}. */
+    /** The microphone permission for search by voice (sys.voice). */
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
+        super.onRequestPermissionsResult(request, permissions, grants);
+        if (remote != null) remote.onPermissionResult(request, grants);
+    }
+
+    /** The voice input's answer (sys.voice). */
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        if (remote != null && remote.onActivityResult(request, result, data)) return;
+        super.onActivityResult(request, result, data);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent e) {
+        if (remote != null && nsh != null && remote.dispatch(e, getWindow(), nsh)) return true;
+        return super.dispatchKeyEvent(e);
     }
 
     @Override
@@ -189,6 +236,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (pip != null) pip.destroy();
+        if (remote != null) remote.destroy();
         if (perf != null) perf.stop();
         // Transfers keep running in the process (DownloadService); only
         // the app's listener goes.

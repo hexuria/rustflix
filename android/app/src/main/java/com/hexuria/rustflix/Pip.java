@@ -43,6 +43,11 @@ import java.util.Map;
  * <p>PiP is per activity: the whole task shrinks, the player's Dialog
  * window with it (it belongs to the activity's token), laid out again at
  * the PiP window's size.
+ *
+ * <p>On a TV leaving the app never enters PiP (the PiP button still does,
+ * where the TV supports it), and leaving it pauses the player. The PiP
+ * window's title is the app's name, or {@code title} of sys.pip /
+ * sys.pipState.
  */
 final class Pip {
     private static final String ACTION = "com.hexuria.rustflix.PIP_ACTION";
@@ -51,6 +56,10 @@ final class Pip {
     private NshView nsh;
     private boolean player, paused = true, inPip;
     private Rational aspect = new Rational(16, 9);
+    /** The PiP window's title (Android 13+), from sys.pip / sys.pipState. */
+    private CharSequence title;
+    /** On a TV: no PiP by itself, and leaving the app pauses. */
+    private final boolean tv;
     /** Views hidden for PiP, with their visibility before. */
     private final Map<View, Integer> hidden = new HashMap<>();
 
@@ -74,6 +83,7 @@ final class Pip {
 
     Pip(Activity activity) {
         this.activity = activity;
+        this.tv = TvRemote.isTv(activity);
         instance = this;
     }
 
@@ -141,6 +151,8 @@ final class Pip {
 
     private void readAspect(Object d) {
         if (!(d instanceof Map)) return;
+        Object t = ((Map<?, ?>) d).get("title");
+        if (t instanceof String && !((String) t).isEmpty()) title = (String) t;
         Object w = ((Map<?, ?>) d).get("w"), h = ((Map<?, ?>) d).get("h");
         if (w instanceof Number && h instanceof Number && ((Number) w).intValue() > 0 && ((Number) h).intValue() > 0) {
             // PiP accepts 1:2.39 … 2.39:1.
@@ -160,9 +172,9 @@ final class Pip {
         }
     }
 
-    /** Android 8–11: leaving the app while a video plays enters PiP. */
+    /** Android 8–11: leaving the app while a video plays enters PiP (not on a TV). */
     void onUserLeaveHint() {
-        if (Build.VERSION.SDK_INT < 31 && playing()) enter();
+        if (Build.VERSION.SDK_INT < 31 && !tv && playing()) enter();
     }
 
     private void update() {
@@ -190,8 +202,11 @@ final class Pip {
         Rect hint = videoRect();
         if (hint != null) b.setSourceRectHint(hint);
         if (Build.VERSION.SDK_INT >= 31) {
-            b.setAutoEnterEnabled(playing());
+            b.setAutoEnterEnabled(!tv && playing());
             b.setSeamlessResizeEnabled(false);
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            b.setTitle(title != null ? title : activity.getApplicationInfo().loadLabel(activity.getPackageManager()));
         }
         return b.build();
     }
@@ -259,9 +274,10 @@ final class Pip {
         if (nsh != null) nsh.send("sys.pip", java.util.Collections.singletonMap("on", on));
     }
 
-    /** The PiP window was dismissed (the activity stops while in PiP). */
+    /** The PiP window was dismissed (the activity stops while in PiP), or,
+     * on a TV, the app was left while the player shows (Home): pause. */
     void onStop() {
-        if (!inPip) return;
+        if (!inPip && !(tv && showing())) return;
         NativeVideo v = NativeVideo.current();
         if (v != null) v.remote("pause");
         else if (nsh != null) nsh.send("sys.pipAction", java.util.Collections.singletonMap("a", "pause"));

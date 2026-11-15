@@ -73,6 +73,7 @@ import {
   Section,
   Skeleton,
 } from "../lib/ui";
+import { tvFocus, TvGroup, tvMode, TV_SAFE, useFocusable, type Focusable } from "../lib/tv";
 
 type TitleRoute = Extract<Route, { name: "title" }>;
 
@@ -222,17 +223,29 @@ function FoldingText(props: { text: string; lines: number }) {
         {props.text}
       </Text>
       <If when={total() > props.lines}>
-        <View
-          role="button"
-          accessibilityLabel={open() ? "Show less" : "Show more"}
-          onPress={() => open.set(!open())}
-          class="cursor-pointer self-start justify-center active:opacity-60"
-          style={{ height: 32 }}
-        >
-          <Text class="font-semibold text-foreground" style={{ fontSize: 14, lineHeight: 18 }}>
-            {open() ? "Less" : "More"}
-          </Text>
-        </View>
+        {() => {
+          // TV: made with the view (it shows only for a long text).
+          const tv = useFocusable({ onPress: () => open.set(!open()) });
+          return (
+            <View
+              ref={tv.ref}
+              role="button"
+              accessibilityLabel={open() ? "Show less" : "Show more"}
+              onMouseEnter={tv.onMouseEnter}
+              onPressIn={tv.onPressIn}
+              onPress={() => open.set(!open())}
+              class={`cursor-pointer self-start justify-center rounded-lg active:opacity-60 ${tv.focused() ? tvFocus.control : ""}`}
+              style={{ height: 32, paddingLeft: tvMode() ? 10 : 0, paddingRight: tvMode() ? 10 : 0 }}
+            >
+              <Text
+                class={`font-semibold ${tv.focused() ? tvFocus.controlText : "text-foreground"}`}
+                style={{ fontSize: tvMode() ? 15 : 14, lineHeight: 18 }}
+              >
+                {open() ? "Less" : "More"}
+              </Text>
+            </View>
+          );
+        }}
       </If>
     </View>
   );
@@ -284,12 +297,30 @@ function EpisodeRow(props: {
       .join(" · "),
   );
   const title = computed(() => `${props.ep.n}. ${props.ep.name || `Episode ${props.ep.n}`}`);
+  // TV: the row is one focusable (select plays it). Right moves onto its
+  // download control (select there downloads, and again cancels; Left
+  // comes back to the row); hold select on the row for the download menu.
+  let dl: Focusable | undefined;
+  const tv = useFocusable({
+    onPress: () => props.onPress(),
+    onLongPress: canDownload() ? () => void openDownloadMenu(props.target()) : undefined,
+    onKey: (k) => {
+      if (k.action !== "down" || k.key !== "right" || !dl || !canDownload()) return false;
+      dl.focus();
+      return true;
+    },
+  });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={`Episode ${props.ep.n}${props.ep.name ? `, ${props.ep.name}` : ""}`}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={props.onPress}
-      class="cursor-pointer flex-row items-center gap-3 hover:bg-white/5 active:bg-white/10"
+      class={`cursor-pointer flex-row items-center gap-3 ${tvMode() ? "rounded-xl" : ""} ${
+        tv.focused() ? tvFocus.row : "hover:bg-white/5 active:bg-white/10"
+      }`}
       style={{
         paddingLeft: GUTTER,
         paddingRight: GUTTER,
@@ -328,12 +359,15 @@ function EpisodeRow(props: {
           {title()}
         </Text>
         <If when={meta()}>
-          <Text class="text-muted-foreground" style={{ fontSize: 12, lineHeight: 16, numberOfLines: 1 }}>
+          <Text class="text-muted-foreground" style={{ fontSize: tvMode() ? 14 : 12, lineHeight: tvMode() ? 18 : 16, numberOfLines: 1 }}>
             {meta()}
           </Text>
         </If>
         <If when={props.ep.overview}>
-          <Text class="text-muted-foreground" style={{ fontSize: 13, lineHeight: 18, numberOfLines: 3 }}>
+          <Text
+            class="text-muted-foreground"
+            style={{ fontSize: tvMode() ? 14 : 13, lineHeight: tvMode() ? 19 : 18, numberOfLines: tvMode() ? 2 : 3 }}
+          >
             {props.ep.overview}
           </Text>
         </If>
@@ -341,7 +375,16 @@ function EpisodeRow(props: {
       {/* The mark's right edge on the gutter: its 44 pt hit area reaches
           past it by the slack around the 24 pt mark. */}
       <View style={{ marginRight: -10 }}>
-        <DownloadButton target={props.target} size={24} />
+        <DownloadButton
+          target={props.target}
+          size={24}
+          tvHandle={(f) => (dl = f)}
+          tvOnKey={(k) => {
+            if (k.action !== "down" || k.key !== "left") return false;
+            tv.focus();
+            return true;
+          }}
+        />
       </View>
     </View>
   );
@@ -399,6 +442,9 @@ export function Title(props: { route: TitleRoute }) {
   const error = signal("");
   const seasonError = signal("");
   const animeLang = signal<"sub" | "dub">(preferredAnimeLang() ?? "sub");
+  /** TV: the artwork is the page's backdrop, the text and actions on its
+   * left, Play focused from the first frame. */
+  const tv = tvMode();
   // Only the newest request of each kind may write: a retry or a season
   // picked while another is loading never shows the older answer.
   let loadSeq = 0;
@@ -1081,10 +1127,10 @@ export function Title(props: { route: TitleRoute }) {
         <Text
           class="font-extrabold text-foreground"
           style={{
-            fontSize: desktop ? 34 : 28,
-            lineHeight: desktop ? 40 : 34,
+            fontSize: desktop || tv ? 34 : 28,
+            lineHeight: desktop || tv ? 40 : 34,
             letterSpacing: -0.3,
-            numberOfLines: 3,
+            numberOfLines: tv ? 2 : 3,
           }}
         >
           {displayTitle()}
@@ -1123,6 +1169,7 @@ export function Title(props: { route: TitleRoute }) {
       label={playLabel()}
       fullWidth={extra.fullWidth}
       onPress={onPlay}
+      autoFocus
     />
   );
 
@@ -1164,7 +1211,7 @@ export function Title(props: { route: TitleRoute }) {
   /** Phone: Play across, Download and My List sharing the row under it.
    * Desktop: the three in one row. All 48 pt. */
   const Actions = () =>
-    desktop ? (
+    desktop || tv ? (
       <View class="flex-row flex-wrap gap-3">
         <View style={{ minWidth: 168 }}>{playButton({})}</View>
         {downloadButton(false)}
@@ -1194,7 +1241,8 @@ export function Title(props: { route: TitleRoute }) {
     <View class="gap-8">
       <If when={error()}>{(e) => <ErrorLine message={e()} onRetry={load} />}</If>
 
-      <If when={overview()}>
+      {/* TV: the overview is under the actions, beside the artwork. */}
+      <If when={!tv && overview()}>
         {(o) => (
           <Section title={isAnime() ? "Synopsis" : "Overview"}>
             <FoldingText text={o()} lines={4} />
@@ -1210,18 +1258,24 @@ export function Title(props: { route: TitleRoute }) {
               <Scroll
                 horizontal
                 scrollbar={false}
-                style={{ height: 36, marginLeft: -GUTTER, marginRight: -GUTTER }}
+                // TV: room for the focused chip's lift.
+                style={{ height: tv ? 52 : 36, marginLeft: -GUTTER, marginRight: -GUTTER }}
               >
-                <View class="flex-row gap-2" style={{ paddingLeft: GUTTER, paddingRight: GUTTER }}>
-                  <Each of={seasons()}>
-                    {(s) => (
-                      <Chip
-                        label={s().name}
-                        selected={selectedSeason() === s().season_number}
-                        onPress={() => pickSeason(s().season_number)}
-                      />
-                    )}
-                  </Each>
+                <View
+                  class="flex-row items-center gap-2"
+                  style={{ paddingLeft: GUTTER, paddingRight: GUTTER, height: tv ? 52 : undefined }}
+                >
+                  <TvGroup>
+                    <Each of={seasons()}>
+                      {(s) => (
+                        <Chip
+                          label={s().name}
+                          selected={selectedSeason() === s().season_number}
+                          onPress={() => pickSeason(s().season_number)}
+                        />
+                      )}
+                    </Each>
+                  </TvGroup>
                 </View>
               </Scroll>
             </If>
@@ -1259,8 +1313,10 @@ export function Title(props: { route: TitleRoute }) {
         <View ref={(n: ViewRef) => (episodesRef = n)}>
           <Section title={animeCount() > 1 ? `Episodes (${animeCount()})` : "Episodes"}>
             <View class="flex-row gap-2">
-              <Chip label="Sub" selected={animeLang() === "sub"} onPress={() => animeLang.set("sub")} />
-              <Chip label="Dub" selected={animeLang() === "dub"} onPress={() => animeLang.set("dub")} />
+              <TvGroup>
+                <Chip label="Sub" selected={animeLang() === "sub"} onPress={() => animeLang.set("sub")} />
+                <Chip label="Dub" selected={animeLang() === "dub"} onPress={() => animeLang.set("dub")} />
+              </TvGroup>
             </View>
             {/* Long shows: the episodes in ranges, opened on the one to
                 watch next. */}
@@ -1268,21 +1324,26 @@ export function Title(props: { route: TitleRoute }) {
               <Scroll
                 horizontal
                 scrollbar={false}
-                style={{ height: 36, marginLeft: -GUTTER, marginRight: -GUTTER }}
+                style={{ height: tv ? 52 : 36, marginLeft: -GUTTER, marginRight: -GUTTER }}
               >
-                <View class="flex-row gap-2" style={{ paddingLeft: GUTTER, paddingRight: GUTTER }}>
-                  <Each of={Array.from({ length: rangeCount() }, (_, i) => i)} key="index">
-                    {(i) => (
-                      <Chip
-                        label={rangeLabel(i())}
-                        selected={range() === i()}
-                        onPress={() => {
-                          rangePicked = true;
-                          range.set(i());
-                        }}
-                      />
-                    )}
-                  </Each>
+                <View
+                  class="flex-row items-center gap-2"
+                  style={{ paddingLeft: GUTTER, paddingRight: GUTTER, height: tv ? 52 : undefined }}
+                >
+                  <TvGroup>
+                    <Each of={Array.from({ length: rangeCount() }, (_, i) => i)} key="index">
+                      {(i) => (
+                        <Chip
+                          label={rangeLabel(i())}
+                          selected={range() === i()}
+                          onPress={() => {
+                            rangePicked = true;
+                            range.set(i());
+                          }}
+                        />
+                      )}
+                    </Each>
+                  </TvGroup>
                 </View>
               </Scroll>
             </If>
@@ -1308,6 +1369,46 @@ export function Title(props: { route: TitleRoute }) {
       </If>
     </View>
   );
+
+  if (tv) {
+    return (
+      <View class="flex-1 bg-background">
+        {/* The artwork, fixed behind the page: the text side and the bottom
+            fade into the page's colour. */}
+        <View class="pointer-events-none absolute inset-0 overflow-hidden">
+          <If when={headerImage()}>
+            <Image
+              src={headerImage()}
+              fadeDuration={HEADER_FADE_MS}
+              style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, objectFit: "cover" }}
+            />
+          </If>
+          <View class="absolute inset-0 bg-linear-to-r from-background via-background/85 to-background/10" />
+          <View class="absolute inset-0 bg-linear-to-t from-background via-background/30 to-transparent" />
+        </View>
+        <Scroll class="flex-1" ref={(n: ScrollRef) => (scrollRef = n)}>
+          <View
+            class="gap-6"
+            style={{
+              paddingTop: TV_SAFE.top + 13,
+              paddingLeft: GUTTER,
+              paddingRight: TV_SAFE.right,
+              paddingBottom: TV_SAFE.bottom + 24,
+            }}
+          >
+            <View class="gap-4" style={{ maxWidth: 560 }}>
+              <Heading />
+              <Actions />
+              <If when={overview()}>{(o) => <FoldingText text={o()} lines={3} />}</If>
+            </View>
+            <If when={bodyReady()}>
+              <Body />
+            </If>
+          </View>
+        </Scroll>
+      </View>
+    );
+  }
 
   if (desktop) {
     return (

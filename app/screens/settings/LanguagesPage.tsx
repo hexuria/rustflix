@@ -9,6 +9,7 @@ import { LANGUAGES, languageName, saveSettings, settings } from "../../lib/store
 import { focusContent } from "../../lib/system";
 import { Button } from "../../lib/ui";
 import { INPUT_CLASS } from "./rows";
+import { tvFocus, tvMode, TvPressable, useFocusable } from "../../lib/tv";
 
 const addOpen = signal(false);
 const langQuery = signal("");
@@ -64,18 +65,22 @@ function IconButton(props: {
   disabled: () => boolean;
   onPress: () => void;
 }) {
+  const press = () => {
+    if (!props.disabled()) props.onPress();
+  };
+  const tv = useFocusable({ onPress: press, disabled: () => props.disabled() });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.label}
-      onPress={() => {
-        if (!props.disabled()) props.onPress();
-      }}
-      class={
+      onMouseEnter={tv.onMouseEnter}
+      onPress={press}
+      class={`${
         props.disabled()
           ? "h-11 w-11 items-center justify-center rounded-lg opacity-30"
           : "h-11 w-11 cursor-pointer items-center justify-center rounded-lg hover:bg-muted active:bg-muted"
-      }
+      } ${tv.focused() ? tvFocus.row : ""}`}
     >
       <Text class="text-lg font-semibold text-foreground">{props.glyph}</Text>
     </View>
@@ -107,9 +112,8 @@ function LanguageRow(props: { code: () => string; index: () => number }) {
         disabled={() => props.index() >= count() - 1}
         onPress={() => moveLang(props.index(), 1)}
       />
-      <View
-        role="button"
-        accessibilityLabel={`Remove ${name()}`}
+      <TvPressable
+        label={`Remove ${name()}`}
         onPress={() => removeLang(props.index())}
         class={
           count() <= 1
@@ -118,39 +122,52 @@ function LanguageRow(props: { code: () => string; index: () => number }) {
         }
       >
         <Text class="text-sm font-medium text-muted-foreground">Remove</Text>
-      </View>
+      </TvPressable>
     </View>
   );
 }
 
 function AddLanguage() {
+  // TV: the field is a focusable (select opens the TV's keyboard; the list
+  // under it can be walked without typing).
+  let input: { focus(): void } | undefined;
+  const tvField = useFocusable({ onPress: () => input?.focus() });
   return (
     <If
       when={addOpen()}
       else={
-        <View
-          role="button"
-          accessibilityLabel="Add a language"
+        <TvPressable
+          label="Add a language"
           onPress={() => addOpen.set(true)}
           class="min-h-12 cursor-pointer flex-row items-center gap-2 px-4 py-2 hover:bg-muted active:bg-muted"
         >
           <Text class="text-lg font-semibold text-primary">+</Text>
           <Text class="text-sm font-semibold text-primary">Add a language</Text>
-        </View>
+        </TvPressable>
       }
     >
       <View class="gap-2 p-3">
         <View class="flex-row items-center gap-2">
-          <Input
-            value={langQuery()}
-            onChange={({ value }) => langQuery.set(value)}
-            placeholder="Search languages"
-            autoFocus
-            onFocus={focusContent}
-            autoCorrect={false}
-            autoCapitalize="none"
-            class={`flex-1 ${INPUT_CLASS}`}
-          />
+          <View
+            ref={tvField.ref}
+            onMouseEnter={tvField.onMouseEnter}
+            class={`flex-1 rounded-lg ${tvField.focused() ? "outline-2 outline-offset-2 outline-white" : ""}`}
+          >
+            <Input
+              ref={(r: { focus(): void }) => (input = r)}
+              value={langQuery()}
+              onChange={({ value }) => langQuery.set(value)}
+              placeholder="Search languages"
+              autoFocus={!tvMode()}
+              onFocus={() => {
+                focusContent();
+                tvField.claim();
+              }}
+              autoCorrect={false}
+              autoCapitalize="none"
+              class={INPUT_CLASS}
+            />
+          </View>
           <Button
             label="Cancel"
             onPress={() => {
@@ -167,14 +184,13 @@ function AddLanguage() {
             <Scroll style={{ maxHeight: 264 }}>
               <Each of={langResults()} key={(l: { code: string; name: string }) => l.code}>
                 {(l) => (
-                  <View
-                    role="button"
-                    accessibilityLabel={`Add ${l().name}`}
+                  <TvPressable
+                    label={`Add ${l().name}`}
                     onPress={() => addLang(l().code)}
                     class="min-h-11 cursor-pointer justify-center border-b border-border px-3 py-2 hover:bg-muted active:bg-muted"
                   >
                     <Text class="text-sm text-foreground">{l().name}</Text>
-                  </View>
+                  </TvPressable>
                 )}
               </Each>
             </Scroll>

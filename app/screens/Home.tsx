@@ -23,6 +23,7 @@ import { debug } from "../lib/player";
 import { perfTask } from "../lib/perf";
 import { continueWatchingByTitle } from "../lib/store";
 import { Glyph } from "./PlayerControls";
+import { tvMode } from "../lib/tv";
 import {
   clearCache,
   currentKey,
@@ -238,10 +239,13 @@ function Hero() {
     const h = hero();
     if (h) playTarget(mediaTarget(h));
   };
+  // TV: the billboard leaves the first rail's posters partly in view on a
+  // 960 x 540 screen; Play has the focus when Home opens.
+  const tv = tvMode();
   return (
     <View
       class="relative w-full overflow-hidden bg-muted"
-      style={{ height: platform.desktop ? 420 : 320 }}
+      style={{ height: tv ? 300 : platform.desktop ? 420 : 320 }}
     >
       <If when={m()?.backdrop_path}>
         <Image
@@ -274,7 +278,7 @@ function Hero() {
         {(h) => (
           <View
             class="absolute bottom-6 left-4 right-6 gap-2"
-            style={{ maxWidth: platform.desktop ? 560 : undefined, left: platform.desktop ? 24 : 16 }}
+            style={{ maxWidth: platform.desktop || tv ? 520 : undefined, left: platform.desktop ? 24 : 16 }}
           >
             <Text class="text-3xl font-extrabold text-foreground" style={{ numberOfLines: 2 }}>
               {mediaTitle(h())}
@@ -288,11 +292,11 @@ function Hero() {
                 <Badge text={`${(h().vote_average ?? 0).toFixed(1)} ★`} />
               </If>
             </View>
-            <Text class="text-sm text-muted-foreground" style={{ numberOfLines: 3 }}>
+            <Text class={tv ? "text-[15px] text-zinc-300" : "text-sm text-muted-foreground"} style={{ numberOfLines: tv ? 2 : 3 }}>
               {h().overview ?? ""}
             </Text>
             <View class="mt-1 flex-row gap-3">
-              <Button variant="primary" icon="play" label="Play" onPress={play} />
+              <Button variant="primary" icon="play" label="Play" onPress={play} autoFocus />
               <Button icon="info" label="Details" onPress={details} />
             </View>
           </View>
@@ -302,9 +306,12 @@ function Hero() {
   );
 }
 
-/** Poster cards: 140 pt wide, 210 pt posters over two lines of text. */
+/** Poster cards: 140 pt wide, 210 pt posters over two lines of text (TV:
+ * 136, with larger text). */
 const POSTER_W = 140;
 const POSTER_H = 250;
+const TV_POSTER_W = 136;
+const TV_POSTER_H = 262;
 
 /** A row driven by a loader: skeletons, then cards; an inline Retry if it
  * failed; nothing at all if it loaded fine but came back empty. Its cards
@@ -334,7 +341,12 @@ function LoadedRow<T>(props: {
             </Row>
           }
         >
-          <ListRow title={props.title} items={l.items()} itemWidth={POSTER_W} itemHeight={POSTER_H}>
+          <ListRow
+            title={props.title}
+            items={l.items()}
+            itemWidth={tvMode() ? TV_POSTER_W : POSTER_W}
+            itemHeight={tvMode() ? TV_POSTER_H : POSTER_H}
+          >
             {(m) => props.children(m)}
           </ListRow>
         </If>
@@ -346,7 +358,13 @@ function LoadedRow<T>(props: {
 function TmdbRow(props: { title: string; loader: Loader<Media>; type?: "movie" | "tv" }) {
   return (
     <LoadedRow title={props.title} loader={props.loader}>
-      {(m) => <MediaCard media={m()} type={props.type ?? (isMovie(m()) ? "movie" : "tv")} />}
+      {(m) => (
+        <MediaCard
+          media={m()}
+          type={props.type ?? (isMovie(m()) ? "movie" : "tv")}
+          width={tvMode() ? TV_POSTER_W : undefined}
+        />
+      )}
     </LoadedRow>
   );
 }
@@ -432,13 +450,17 @@ export function Home() {
         homeScroll = n;
       }}
       class="flex-1"
-      refreshing={refreshing()}
-      onRefresh={() => void refresh()}
+      // TV: no pull to refresh (no touch); a failed row has its Retry.
+      refreshing={tvMode() ? undefined : refreshing()}
+      onRefresh={tvMode() ? undefined : () => void refresh()}
     >
       <If when={!offline()}>
         <Hero />
       </If>
-      <View class="gap-6 pb-10 pt-4">
+      <View
+        class={tvMode() ? "gap-5 pt-4" : "gap-6 pb-10 pt-4"}
+        style={tvMode() ? { paddingRight: 32, paddingBottom: 48 } : undefined}
+      >
         <If when={offline()}>
           <ContinueRow />
           <OfflineState />
@@ -472,7 +494,7 @@ export function Home() {
         </If>
         <If when={later(6) || !hasKey()}>
           <LoadedRow title="Trending Anime" loader={animeRow}>
-            {(m) => <AnimeCard anime={m()} />}
+            {(m) => <AnimeCard anime={m()} width={tvMode() ? TV_POSTER_W : undefined} />}
           </LoadedRow>
         </If>
         </If>

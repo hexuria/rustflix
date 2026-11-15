@@ -8,6 +8,7 @@
 import { computed, keymap, Text, View, type InputRef } from "nsh";
 import { Input } from "nsh/base";
 import { focusContent } from "../../lib/system";
+import { tvFocus, tvMode, useFocusable } from "../../lib/tv";
 import { settingsCtx } from "./ctx";
 import { openResult } from "./nav";
 import { CategoryIcon, Chevron } from "./rows";
@@ -48,13 +49,20 @@ export function SettingsSearchField() {
   );
 }
 
-/** The field over the category list (phones, tablets). */
+/** The field over the category list (phones, tablets, TVs). TV: a
+ * focusable around it: select opens the keyboard, up / down leave it. */
 export function SearchBox() {
-  return (
+  let ref: InputRef | undefined;
+  const tv = useFocusable({ onPress: () => ref?.focus() });
+  const input = (
     <Input
+      ref={(r: InputRef) => (ref = r)}
       value={settingsQuery()}
       onChange={({ value }) => settingsQuery.set(value)}
-      onFocus={focusContent}
+      onFocus={() => {
+        focusContent();
+        tv.claim();
+      }}
       placeholder="Search settings"
       accessibilityLabel="Search settings"
       autoCorrect={false}
@@ -63,27 +71,67 @@ export function SearchBox() {
       class="min-h-10 rounded-xl bg-white/10 px-3 py-2 text-foreground"
     />
   );
+  if (!tvMode()) return input;
+  return (
+    <View
+      ref={tv.ref}
+      onMouseEnter={tv.onMouseEnter}
+      class={`rounded-xl ${tv.focused() ? "outline-4 outline-offset-2 outline-white" : ""}`}
+    >
+      {input}
+    </View>
+  );
 }
 
 function ResultRow(props: { category: string; row: RowDef }) {
+  const tv = useFocusable({ onPress: () => openResult(props.category, props.row.id) });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.row.label}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
       onPress={() => openResult(props.category, props.row.id)}
-      class="min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 hover:bg-muted/50 active:bg-muted"
+      class={`min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 ${
+        tv.focused() ? tvFocus.row : "hover:bg-muted/50 active:bg-muted"
+      }`}
     >
       <View class="flex-1 gap-0.5">
         <Text class="text-sm font-medium text-foreground">{props.row.label}</Text>
         <If when={props.row.description}>
           {(d) => (
-            <Text class="text-xs text-muted-foreground" style={{ numberOfLines: 2 }}>
+            <Text class={tvMode() ? "text-sm text-muted-foreground" : "text-xs text-muted-foreground"} style={{ numberOfLines: 2 }}>
               {d()}
             </Text>
           )}
         </If>
       </View>
       <Chevron />
+    </View>
+  );
+}
+
+/** A result group's heading: opens its category. */
+function HitHeader(props: { category: SearchHit["category"] }) {
+  const tv = useFocusable({ onPress: () => openResult(props.category.id) });
+  return (
+    <View
+      ref={tv.ref}
+      role="button"
+      accessibilityLabel={`Open ${props.category.label}`}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
+      onPress={() => openResult(props.category.id)}
+      class={`cursor-pointer flex-row items-center gap-2 rounded-lg px-1 ${tv.focused() ? tvFocus.row : ""}`}
+    >
+      <CategoryIcon category={props.category} size={20} />
+      <Text
+        class={`${tvMode() ? "text-sm" : "text-xs"} font-semibold uppercase text-muted-foreground`}
+        style={{ letterSpacing: 0.4 }}
+      >
+        {props.category.label}
+      </Text>
     </View>
   );
 }
@@ -103,17 +151,7 @@ export function SearchResults() {
         <Each of={hits()} key={(h: SearchHit) => h.category.id}>
           {(h) => (
             <View class="gap-1.5">
-              <View
-                role="button"
-                accessibilityLabel={`Open ${h().category.label}`}
-                onPress={() => openResult(h().category.id)}
-                class="cursor-pointer flex-row items-center gap-2 px-1"
-              >
-                <CategoryIcon category={h().category} size={20} />
-                <Text class="text-xs font-semibold uppercase text-muted-foreground" style={{ letterSpacing: 0.4 }}>
-                  {h().category.label}
-                </Text>
-              </View>
+              <HitHeader category={h().category} />
               <If when={h().rows.length > 0}>
                 <View class="overflow-hidden rounded-xl border border-border bg-card">
                   <Each of={h().rows} key={(r: RowDef) => r.id}>

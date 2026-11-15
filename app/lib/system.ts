@@ -149,6 +149,14 @@ export function togglePlayerFullscreen(): void {
   playerFullscreen.set(!untracked(playerFullscreen));
 }
 
+/** Android: whether the system's navigation buttons stay hidden in the app
+ * (`sys.navBar`; SystemControls.java keeps the choice, so the next launch
+ * starts with it). A no-op elsewhere. */
+export function setNavButtonsHidden(hidden: boolean): void {
+  if (!ANDROID_HOST || !hostUp) return;
+  void host.call("sys.navBar", { hidden }).catch(() => {});
+}
+
 /** Android: the player's window while it shows — screen kept on, inline or
  * full screen (`playerFullscreen`, read here so an effect calling this
  * follows it) — and back to normal when it closes (`sys.playerWindow`).

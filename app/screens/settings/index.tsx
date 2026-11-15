@@ -17,6 +17,7 @@
 // removed after one run unless "keep").
 
 import { computed, effect, platform, Scroll, Storage, Text, untracked, View, keymap, type ScrollRef, type ViewRef } from "nsh";
+import { focusKey, onTvBack, tvFocus, TvGroup, tvMode, TV_SAFE, useFocusable } from "../../lib/tv";
 import { currentTab, goBack, navigate, route, selectTab, tabStack } from "../../lib/router";
 import { saveSettings } from "../../lib/store";
 import { AboutHeader, AcknowledgementsRow, tapVersion, VersionRow } from "./AboutPage";
@@ -56,6 +57,7 @@ import { CacheRow, LibraryCounts } from "./StoragePage";
 import {
   flashRow,
   highlightRow,
+  onTv,
   refreshKeyboard,
   selectedPage,
   setDevMode,
@@ -99,14 +101,27 @@ function PickerBody(props: { rowId: string; showBack: boolean }) {
   if (!found || found.row.control.kind !== "picker") return <View />;
   const { category, row } = found;
   const c = found.row.control;
+  // TV: the chosen value has the focus; leaving, the row that opened the
+  // list gets it back.
+  focusKey(`opt:${c.get()}`);
+  const close = () => {
+    focusKey(`row:${row.id}`);
+    closePicker(category.id);
+  };
+  const back = useFocusable({ onPress: close });
   return (
     <View class="gap-3">
       <If when={props.showBack}>
         <View
+          ref={back.ref}
           role="button"
           accessibilityLabel={`Back to ${category.label}`}
-          onPress={() => closePicker(category.id)}
-          class="cursor-pointer flex-row items-center gap-1 self-start rounded-md py-1 pr-2 hover:bg-muted/50"
+          onMouseEnter={back.onMouseEnter}
+          onPressIn={back.onPressIn}
+          onPress={close}
+          class={`cursor-pointer flex-row items-center gap-1 self-start rounded-md py-1 pr-2 ${
+            back.focused() ? `${tvFocus.row} pl-2` : "hover:bg-muted/50"
+          }`}
         >
           <Text class="text-sm font-medium text-primary">{`‹ ${category.label}`}</Text>
         </View>
@@ -121,25 +136,43 @@ function PickerBody(props: { rowId: string; showBack: boolean }) {
               <If when={i() > 0}>
                 <View class="ml-4 h-px bg-border" />
               </If>
-              <View
-                role="radio"
-                accessibilityLabel={o().label}
-                accessibilityState={{ checked: c.get() === o().value, selected: c.get() === o().value }}
-                onPress={() => {
+              <PickerOption
+                label={o().label}
+                value={o().value}
+                checked={c.get() === o().value}
+                onPick={() => {
                   c.set(o().value);
-                  closePicker(category.id);
+                  close();
                 }}
-                class="min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 hover:bg-muted/50 active:bg-muted"
-              >
-                <Text class="flex-1 text-sm text-foreground">{o().label}</Text>
-                <If when={c.get() === o().value}>
-                  <Text class="text-sm font-bold text-primary">✓</Text>
-                </If>
-              </View>
+              />
             </>
           )}
         </Each>
       </View>
+    </View>
+  );
+}
+
+/** One value of a picker's list. */
+function PickerOption(props: { label: string; value: string; checked: boolean; onPick: () => void }) {
+  const tv = useFocusable({ onPress: () => props.onPick(), key: () => `opt:${props.value}` });
+  return (
+    <View
+      ref={tv.ref}
+      role="radio"
+      accessibilityLabel={props.label}
+      accessibilityState={{ checked: props.checked, selected: props.checked }}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
+      onPress={() => props.onPick()}
+      class={`min-h-12 cursor-pointer flex-row items-center gap-3 px-4 py-2.5 ${
+        tv.focused() ? tvFocus.row : "hover:bg-muted/50 active:bg-muted"
+      }`}
+    >
+      <Text class={tvMode() ? "flex-1 text-[15px] text-foreground" : "flex-1 text-sm text-foreground"}>{props.label}</Text>
+      <If when={props.checked}>
+        <Text class="text-sm font-bold text-primary">✓</Text>
+      </If>
     </View>
   );
 }
@@ -182,7 +215,8 @@ function PageScroll(props: { page: string; title: boolean; split: boolean }) {
     <Scroll ref={(r: ScrollRef) => (scroll = r)} class="flex-1">
       <View
         class={props.split ? "w-full gap-5 self-center px-6 pb-10 pt-6" : "w-full gap-5 self-center px-4 pb-10 pt-4"}
-        style={{ maxWidth: PAGE_MAX }}
+        // TV: inside the overscan-safe area.
+        style={tvMode() ? { maxWidth: PAGE_MAX, paddingTop: TV_SAFE.top, paddingRight: TV_SAFE.right } : { maxWidth: PAGE_MAX }}
       >
         <If when={props.title}>
           <Text class="px-1 text-2xl font-bold text-foreground">{settingsPageTitle(props.page)}</Text>
@@ -202,6 +236,7 @@ function PageScroll(props: { page: string; title: boolean; split: boolean }) {
  * it for the `settingsPage` route inside a NavPage titled
  * `settingsPageTitle(page)`. */
 export function SettingsPage(props: { page: string }) {
+  onTv.set(untracked(tvMode));
   return <PageScroll page={props.page} title={false} split={false} />;
 }
 
@@ -215,24 +250,42 @@ function pageCategory(page: string): string {
 /** One category in the split layouts' column. */
 function ColumnItem(props: { category: CategoryDef }) {
   const chosen = () => !settingsQuery().trim() && pageCategory(selectedPage()) === props.category.id;
+  const choose = () => {
+    settingsQuery.set("");
+    selectedPage.set(props.category.id);
+  };
+  // TV: moving through the column shows each category's page beside it;
+  // the shown one has the focus when Settings opens.
+  const tv = useFocusable({
+    onPress: choose,
+    onFocus: () => {
+      if (!chosen()) choose();
+    },
+    key: () => `cat:${props.category.id}`,
+    autoFocus: untracked(chosen),
+  });
   return (
     <View
+      ref={tv.ref}
       role="tab"
       accessibilityLabel={props.category.label}
       accessibilityState={{ selected: chosen() }}
-      onPress={() => {
-        settingsQuery.set("");
-        selectedPage.set(props.category.id);
-      }}
+      onMouseEnter={tv.onMouseEnter}
+      onPressIn={tv.onPressIn}
+      onPress={choose}
       class={
-        chosen()
-          ? "min-h-9 cursor-pointer flex-row items-center gap-2.5 rounded-lg bg-white/10 px-2.5 py-1.5"
-          : "min-h-9 cursor-pointer flex-row items-center gap-2.5 rounded-lg px-2.5 py-1.5 hover:bg-white/5 active:bg-white/10"
+        tv.focused()
+          ? `min-h-11 cursor-pointer flex-row items-center gap-2.5 rounded-lg px-2.5 py-1.5 ${tvFocus.control}`
+          : chosen()
+            ? `${tvMode() ? "min-h-11" : "min-h-9"} cursor-pointer flex-row items-center gap-2.5 rounded-lg bg-white/10 px-2.5 py-1.5`
+            : `${tvMode() ? "min-h-11" : "min-h-9"} cursor-pointer flex-row items-center gap-2.5 rounded-lg px-2.5 py-1.5 hover:bg-white/5 active:bg-white/10`
       }
     >
       <CategoryIcon category={props.category} size={platform.desktop ? 22 : 28} />
       <Text
-        class={chosen() ? "flex-1 text-sm font-semibold text-foreground" : "flex-1 text-sm text-foreground"}
+        class={`${tvMode() ? "text-[15px]" : "text-sm"} flex-1 ${
+          tv.focused() ? `font-semibold ${tvFocus.controlText}` : chosen() ? "font-semibold text-foreground" : "text-foreground"
+        }`}
         style={{ numberOfLines: 1 }}
       >
         {props.category.label}
@@ -247,7 +300,7 @@ function SplitView() {
   // Desktop: ↑ / ↓ move through the categories while Settings shows and no
   // field has the keyboard.
   effect(() => {
-    if (!platform.desktop || currentTab() !== "settings" || route().name === "player") return;
+    if (!platform.desktop || tvMode() || currentTab() !== "settings" || route().name === "player") return;
     const move = (d: 1 | -1) => {
       const list = untracked(cats);
       const at = list.findIndex((c) => c.id === pageCategory(untracked(selectedPage)));
@@ -261,18 +314,22 @@ function SplitView() {
   });
   return (
     <View class="flex-1 flex-row">
-      <View class="border-r border-border" style={{ width: platform.desktop ? 236 : 300 }}>
+      {/* TV: a narrower column (the rail is beside it), inside the
+          overscan-safe area; up / down stay in it. */}
+      <View class="border-r border-border" style={{ width: tvMode() ? 260 : platform.desktop ? 236 : 300 }}>
         <Scroll class="flex-1">
-          <View class="gap-0.5 px-3 pb-6 pt-4">
+          <View class={tvMode() ? "gap-1 px-3 pb-8" : "gap-0.5 px-3 pb-6 pt-4"} style={tvMode() ? { paddingTop: TV_SAFE.top } : undefined}>
             <If when={!platform.desktop}>
               <View class="pb-3">
                 <Text class="px-1 pb-3 text-3xl font-bold text-foreground">Settings</Text>
                 <SearchBox />
               </View>
             </If>
-            <Each of={cats()} key={(c: CategoryDef) => c.id}>
-              {(c) => <ColumnItem category={c()} />}
-            </Each>
+            <TvGroup axis="column">
+              <Each of={cats()} key={(c: CategoryDef) => c.id}>
+                {(c) => <ColumnItem category={c()} />}
+              </Each>
+            </TvGroup>
           </View>
         </Scroll>
       </View>
@@ -286,7 +343,10 @@ function SplitView() {
           }
         >
           <Scroll class="flex-1">
-            <View class="w-full self-center px-6 pb-10 pt-6" style={{ maxWidth: PAGE_MAX }}>
+            <View
+              class="w-full self-center px-6 pb-10 pt-6"
+              style={tvMode() ? { maxWidth: PAGE_MAX, paddingTop: TV_SAFE.top, paddingRight: TV_SAFE.right } : { maxWidth: PAGE_MAX }}
+            >
               <Text class="px-1 pb-4 text-2xl font-bold text-foreground">Search</Text>
               <SearchResults />
             </View>
@@ -356,6 +416,24 @@ function ListRoot() {
 
 /** The Settings tab's root page. */
 export function Settings() {
+  onTv.set(untracked(tvMode));
+  // TV: Back closes a picker (back to its category) or the search first.
+  onTvBack(() => {
+    if (currentTab() !== "settings" || route().name !== "settings") return false;
+    const page = selectedPage();
+    if (page.startsWith("pick:")) {
+      const f = findRow(page.slice(5));
+      if (!f) return false;
+      focusKey(`row:${f.row.id}`);
+      closePicker(f.category.id);
+      return true;
+    }
+    if (settingsQuery().trim()) {
+      settingsQuery.set("");
+      return true;
+    }
+    return false;
+  });
   refreshKeyboard();
   effect(() => {
     if (currentTab() === "settings") refreshKeyboard();

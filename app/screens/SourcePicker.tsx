@@ -15,6 +15,7 @@ import { NEEDS_INTERCEPT, sourcesFor, type MediaType, type Source } from "../lib
 import { nativeEnabled, nativeMode, sourcePlayback } from "../lib/playback/caps";
 import { Glyph } from "./PlayerControls";
 import { showEpisodes } from "./EpisodePicker";
+import { TvPressable, TvScope } from "../lib/tv";
 
 export const showSourcesPicker = showSources;
 
@@ -33,7 +34,10 @@ export function closeSources() {
 export function SourcePicker() {
   return (
     <If when={showSources()}>
-      <SourceLayer />
+      {/* TV: the D-pad stays in the picker; Back closes it. */}
+      <TvScope onBack={closeSources}>
+        <SourceLayer />
+      </TvScope>
     </If>
   );
 }
@@ -50,9 +54,9 @@ function SourceLayer() {
   const inApp = computed(() => (grouped() ? list().filter((s) => sourcePlayback(s.id) === "native") : list()));
   const onSite = computed(() => (grouped() ? list().filter((s) => sourcePlayback(s.id) !== "native") : []));
   const row = (s: () => Source) => (
-    <View
-      role="button"
-      accessibilityLabel={s().label}
+    <TvPressable
+      label={s().label}
+      autoFocus={activeSource() === s().id}
       onPress={() => pickSource(s().id)}
       class={`min-h-[52px] cursor-pointer flex-row items-center gap-3 rounded-xl px-3 py-2.5 active:bg-white/15 ${
         platform.desktop ? "hover:bg-white/10" : ""
@@ -74,7 +78,7 @@ function SourceLayer() {
       <If when={activeSource() === s().id}>
         <Glyph d="check" size={20} color="#e50914" />
       </If>
-    </View>
+    </TvPressable>
   );
   return (
     <View
@@ -94,14 +98,13 @@ function SourceLayer() {
             {route()?.title ?? ""}
           </Text>
         </View>
-        <View
-          role="button"
-          accessibilityLabel="Close"
+        <TvPressable
+          label="Close"
           onPress={closeSources}
           class="h-11 w-11 cursor-pointer items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20"
         >
           <Glyph d="close" size={22} />
-        </View>
+        </TvPressable>
       </View>
       <Scroll class="mt-3 flex-1">
         <View class="flex-col gap-1 pb-4" style={{ paddingLeft: padL() - 8, paddingRight: padR() - 8 }}>

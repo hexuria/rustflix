@@ -36,13 +36,28 @@ import java.util.Map;
  *       Android 13+ the back gesture leaves full screen first, reported to
  *       the app as {@code sys.fullscreen {on: false}}.
  * </ul>
+ *
+ * <p>On a TV ({@link TvRemote#isTv}) the window stays landscape, the
+ * navigation buttons are never hidden (there are none), the edge swipe back
+ * is off, and back closes the player even in full screen (full screen
+ * changes nothing on a TV, so a press there would seem lost). Every dialog
+ * window's keys pass {@link TvRemote} while the remote's keys are captured.
  */
 final class SystemControls {
     private final Activity activity;
     private final AudioManager audio;
     private boolean player, fullscreen;
+    /** Settings → General → "Hide Android's navigation buttons": kept here so
+     * a launch starts with it, before the app's bundle has loaded. */
+    private boolean hideNav;
+    private static final String PREFS = "rustflix.ui";
+    private static final String KEY_HIDE_NAV = "hideNavButtons";
     /** Picture-in-picture follows the player (set by MainActivity). */
     Pip pip;
+    /** The TV remote's keys, from every dialog window too (set by MainActivity). */
+    TvRemote remote;
+    /** On a TV: no navigation buttons to hide, no edge swipe, landscape. */
+    private final boolean tv;
     private NshView nsh;
     /** The back callback that leaves full screen (Android 13+), and where. */
     private Object backCallback;
@@ -51,6 +66,8 @@ final class SystemControls {
     SystemControls(Activity activity) {
         this.activity = activity;
         this.audio = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
+        this.hideNav = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_HIDE_NAV, true);
+        this.tv = TvRemote.isTv(activity);
     }
 
     void register(NshView nsh) {
@@ -68,6 +85,24 @@ final class SystemControls {
                 // Left empty: the app falls back to its bundled version.
             }
             r.resolve(m);
+        });
+        // {hidden}: whether the navigation buttons stay out of the app
+        // (only with button navigation; see `hidesNavButtons`).
+        nsh.handle("sys.navBar", (d, r) -> {
+            Map<?, ?> m = d instanceof Map ? (Map<?, ?>) d : java.util.Collections.emptyMap();
+            boolean hidden = Boolean.TRUE.equals(m.get("hidden"));
+            if (hidden != hideNav) {
+                hideNav = hidden;
+                activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_HIDE_NAV, hidden).apply();
+            }
+            activity.runOnUiThread(() -> {
+                bars();
+                nsh.requestApplyInsets(); // the layout's insets follow the setting
+            });
+            Map<String, Object> out = new HashMap<>();
+            out.put("ok", true);
+            out.put("buttons", !tv && buttonNavigation());
+            r.resolve(out);
         });
         nsh.handle("sys.getBrightness", (d, r) -> r.resolve(value(brightness())));
         nsh.handle("sys.setBrightness", (d, r) -> {
@@ -96,6 +131,8 @@ final class SystemControls {
         nsh.handle("sys.playerWindow", (d, r) -> {
             Map<?, ?> m = d instanceof Map ? (Map<?, ?>) d : java.util.Collections.emptyMap();
             setPlayer(Boolean.TRUE.equals(m.get("on")), Boolean.TRUE.equals(m.get("fullscreen")));
+            // The player's window opens (or closes) around this call.
+            activity.runOnUiThread(this::watchNewWindows);
             WebViewTweaks.setPlayerPageTouches(Boolean.TRUE.equals(m.get("pageTouches")));
             r.resolve(null);
         });
@@ -137,17 +174,50 @@ final class SystemControls {
         if (pip != null) pip.setPlayer(on);
         if (on) activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        activity.setRequestedOrientation(full
+        activity.setRequestedOrientation(tv
+                ? ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                : full
                 ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 : ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
         bars();
         backLeavesFullscreen(full);
     }
 
+    /** The activity's window has focus (a launch, back from another app, a
+     * dialog closed): whatever put the navigation buttons back, they go
+     * again at once. */
+    void focusGained() {
+        if (Build.VERSION.SDK_INT < 30 || !hidesNavButtons() || (player && fullscreen)) return;
+        WindowInsetsController c = activity.getWindow().getInsetsController();
+        if (c != null) hideNavNow(c, 12);
+    }
+
     /** Back in front, or a window came or went: the bars as they should be. */
     void reapply() {
-        if (player) bars();
+        if (player || hideNav) {
+            bars();
+            watchNewWindows();
+        }
         if (fullscreen) backLeavesFullscreen(true);
+        wrapDialogs();
+    }
+
+    /**
+     * While the remote's keys are captured (or on a TV): every dialog
+     * window NSH has open passes its keys through {@link #wrapWindow}. Called
+     * whenever a window gains or loses focus (the activity's, or a dialog's
+     * through its wrapped callback): a dialog that opens later takes the
+     * focus from the window under it, which lands here. Main thread.
+     */
+    void wrapDialogs() {
+        if (remote == null || !(tv || TvRemote.capturing())) return;
+        View main = activity.getWindow().getDecorView();
+        for (View root : WebViewTweaks.windowRoots()) {
+            if (root == main || !root.isAttachedToWindow() || guarded.contains(root)) continue;
+            wrapWindow(root);
+            // It may have gained focus before it was wrapped.
+            if (root.hasWindowFocus()) remote.settleFocus(root);
+        }
     }
 
     /** While in full screen, back leaves it (on the player's own window:
@@ -160,14 +230,14 @@ final class SystemControls {
         for (View root : WebViewTweaks.windowRoots()) {
             if (root != main && root.isAttachedToWindow()) target = root;
         }
-        if (on) guardBackKey(target);
+        if (on) wrapWindow(target);
         if (Build.VERSION.SDK_INT < 33) return;
         if (backCallback != null && backDispatcher != null) {
             backDispatcher.unregisterOnBackInvokedCallback((android.window.OnBackInvokedCallback) backCallback);
         }
         backCallback = null;
         backDispatcher = null;
-        if (!on) return;
+        if (!on || tv) return;
         android.window.OnBackInvokedDispatcher d = target.findOnBackInvokedDispatcher();
         if (d == null) return;
         android.window.OnBackInvokedCallback cb = this::leaveFullscreen;
@@ -176,34 +246,182 @@ final class SystemControls {
         backDispatcher = d;
     }
 
+    /** Frames left of looking for a window that has just been added. */
+    private int watchFrames;
+    private final android.view.Choreographer.FrameCallback watch = new android.view.Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            bars();
+            if (--watchFrames > 0) android.view.Choreographer.getInstance().postFrameCallback(this);
+        }
+    };
+
+    /**
+     * A window is about to open (the player's Dialog, another modal): for
+     * the next half second its bars are set the frame it is added, before
+     * it takes focus. Left until the focus change, the system first shows
+     * the navigation buttons for the new window and then hides them again
+     * — the flicker this avoids. Main thread.
+     */
+    private void watchNewWindows() {
+        boolean idle = watchFrames <= 0;
+        watchFrames = 30;
+        if (idle) android.view.Choreographer.getInstance().postFrameCallback(watch);
+    }
+
+    /** What each window's bars were last set to (0 shown, 1 no navigation
+     * buttons, 2 none): a window is only asked again when that changes. */
+    private final java.util.Map<View, Integer> barState = new java.util.WeakHashMap<>();
+
     /** Every window's bars: NSH shows the player in a Dialog, whose window
      * (focused while it is up) decides what the system bars do. */
     private void bars() {
-        for (View root : WebViewTweaks.windowRoots()) bars(root);
+        View decor = activity.getWindow().getDecorView();
+        boolean seen = false;
+        for (View root : WebViewTweaks.windowRoots()) {
+            seen |= root == decor;
+            bars(root);
+        }
+        // At launch the activity's window is not listed yet.
+        if (!seen) bars(decor);
+    }
+
+    /** Whether the system bar holds buttons (three or two) rather than the
+     * gesture pill: `config_navBarInteractionMode` is 0 or 1 for buttons, 2
+     * for gestures. Unknown (Android before 10): buttons. */
+    boolean buttonNavigation() {
+        android.content.res.Resources res = activity.getResources();
+        int id = res.getIdentifier("config_navBarInteractionMode", "integer", "android");
+        return id == 0 || res.getInteger(id) != 2;
+    }
+
+    /** Whether the swipe from the left edge goes back: with button
+     * navigation, never on a TV (a pointer remote's drag is no swipe). */
+    boolean edgeBack() {
+        return !tv && buttonNavigation();
+    }
+
+    /** The navigation buttons are kept away: the setting is on and the
+     * phone has buttons. With gestures the thin pill stays (hiding it would
+     * only make the back swipe need a second try). */
+    private boolean hidesNavButtons() {
+        return !tv && hideNav && buttonNavigation();
+    }
+
+    /**
+     * The buttons go at once, with no animation. A plain {@code hide()} has
+     * the system slide them out, and that slide runs in this process: at a
+     * cold start, while the bundle loads, it stalled half way and then
+     * jumped. Taking the animation over and finishing it immediately skips
+     * it. Control only exists once the window has focus; until then
+     * ({@code onCancelled}) this asks again on the next frames, and falls
+     * back to the plain request.
+     */
+    private void hideNavNow(WindowInsetsController c, int tries) {
+        if (Build.VERSION.SDK_INT < 30) return;
+        c.controlWindowInsetsAnimation(WindowInsets.Type.navigationBars(), -1, null, null,
+                new android.view.WindowInsetsAnimationControlListener() {
+                    @Override
+                    public void onReady(android.view.WindowInsetsAnimationController ctl, int types) {
+                        ctl.finish(false);
+                    }
+
+                    @Override
+                    public void onFinished(android.view.WindowInsetsAnimationController ctl) {}
+
+                    @Override
+                    public void onCancelled(android.view.WindowInsetsAnimationController ctl) {
+                        if (!hidesNavButtons() || (player && fullscreen)) return;
+                        if (tries > 0) {
+                            android.view.Choreographer.getInstance().postFrameCallback(t -> hideNavNow(c, tries - 1));
+                        } else {
+                            c.hide(WindowInsets.Type.navigationBars());
+                        }
+                    }
+                });
+    }
+
+    /**
+     * The insets the app is laid out with: without the navigation bar's
+     * while it is kept away. Left in, the first layout (before the window
+     * has focus and the buttons go) keeps room for the bar and the next
+     * one gives it back — the whole page moving by the bar's height a
+     * moment after it shows. The tab bar sits at the bottom from the first
+     * frame instead.
+     */
+    @SuppressWarnings("deprecation")
+    WindowInsets layoutInsets(WindowInsets insets) {
+        if (insets == null || !hidesNavButtons() || (player && fullscreen)) return insets;
+        if (Build.VERSION.SDK_INT >= 30) {
+            return new WindowInsets.Builder(insets)
+                    .setInsets(WindowInsets.Type.navigationBars(), android.graphics.Insets.NONE)
+                    .build();
+        }
+        // Android 8–10: the bottom inset is the bar's unless a keyboard is up.
+        int bottom = insets.getSystemWindowInsetBottom();
+        if (bottom != insets.getStableInsetBottom()) return insets;
+        return insets.replaceSystemWindowInsets(
+                insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), 0);
     }
 
     @SuppressWarnings("deprecation")
     private void bars(View root) {
+        // The player's own window (NSH's modal Dialog) is transparent and
+        // lays its content out below the status bar, so the page under it
+        // (a title's banner) showed behind the clock and battery. Black
+        // behind the whole window: the strip matches the player. The window
+        // goes away with the player, so nothing is put back.
+        if (player && root != activity.getWindow().getDecorView()) root.setBackgroundColor(0xff000000);
+        // Its touches (the edge swipe back) and its back key pass through us.
+        wrapWindow(root);
+        boolean all = player && fullscreen;
+        boolean nav = !all && hidesNavButtons();
+        int want = all ? 2 : nav ? 1 : 0;
+        Integer had = barState.put(root, want);
+        if (had != null && had == want) return;
         if (Build.VERSION.SDK_INT >= 30) {
-            WindowInsetsController c = root.getWindowInsetsController();
-            if (c == null) return;
-            if (player && fullscreen) {
+            // The activity's own window has a controller before it is attached.
+            WindowInsetsController c = root == activity.getWindow().getDecorView()
+                    ? activity.getWindow().getInsetsController()
+                    : root.getWindowInsetsController();
+            if (c == null) {
+                barState.remove(root); // not attached yet: asked again next time
+                return;
+            }
+            if (all) {
                 c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
                 c.hide(WindowInsets.Type.systemBars());
+            } else if (nav) {
+                // A swipe up from the bottom edge shows the buttons for a
+                // moment, over the app.
+                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                c.show(WindowInsets.Type.statusBars());
+                if (root == activity.getWindow().getDecorView()) {
+                    // The activity's window: see hideNavNow (no animation).
+                    // Without focus yet, `focusGained` does it.
+                    if (root.hasWindowFocus()) hideNavNow(c, 12);
+                } else {
+                    // A dialog over it: the buttons are already away, so
+                    // the plain request changes nothing on screen.
+                    c.hide(WindowInsets.Type.navigationBars());
+                }
             } else {
                 c.show(WindowInsets.Type.systemBars());
             }
         } else {
             int flags = root.getSystemUiVisibility();
-            int immersive = View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-            root.setSystemUiVisibility(player && fullscreen ? flags | immersive : flags & ~immersive);
+            int navOnly = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+            int immersive = View.SYSTEM_UI_FLAG_FULLSCREEN | navOnly;
+            flags &= ~immersive;
+            if (all) flags |= immersive;
+            else if (nav) flags |= navOnly;
+            root.setSystemUiVisibility(flags);
         }
     }
 
     private boolean swallowBackKey;
 
-    /** Player windows whose key events already pass {@link #guardBackKey}. */
+    /** Dialog windows whose events already pass {@link #wrapWindow}. */
     private final java.util.Set<View> guarded = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     /**
@@ -214,8 +432,14 @@ final class SystemControls {
      * only leaves full screen. Reaches the window through DecorView's
      * {@code mWindow} (a non-SDK field, reflection); where that is refused
      * the key keeps NSH's behaviour (the gesture still works).
+     *
+     * <p>The same callback hands the TV remote's keys to {@link TvRemote}
+     * before the dialog (or any view in it) sees them, and on a focus change
+     * settles the window's focus and wraps any dialog that has just opened
+     * ({@link #wrapDialogs}). Where the reflection is refused, a dialog's
+     * remote keys stay NSH's (they do nothing there).
      */
-    private void guardBackKey(View root) {
+    private void wrapWindow(View root) {
         if (guarded.contains(root) || root == activity.getWindow().getDecorView()) return;
         try {
             java.lang.reflect.Field f = root.getClass().getDeclaredField("mWindow");
@@ -224,18 +448,44 @@ final class SystemControls {
             if (w == null) return;
             final android.view.Window.Callback inner = w.getCallback();
             if (inner == null) return;
+            // Swipe from the left edge: the same as the back key, sent
+            // through this window's callback (so full screen is left first).
+            final EdgeBack edge = new EdgeBack(root, this::edgeBack, () -> {
+                android.view.Window.Callback cb = w.getCallback();
+                if (cb == null) return;
+                long now = android.os.SystemClock.uptimeMillis();
+                cb.dispatchKeyEvent(new android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_BACK, 0));
+                cb.dispatchKeyEvent(new android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_BACK, 0));
+            });
             android.view.Window.Callback wrapped = (android.view.Window.Callback) java.lang.reflect.Proxy.newProxyInstance(
                     android.view.Window.Callback.class.getClassLoader(),
                     new Class<?>[] {android.view.Window.Callback.class},
                     (proxy, method, args) -> {
+                        if ("dispatchTouchEvent".equals(method.getName())
+                                && args != null && args.length == 1 && args[0] instanceof android.view.MotionEvent) {
+                            boolean taken = edge.onTouch((android.view.MotionEvent) args[0], e -> {
+                                try {
+                                    return Boolean.TRUE.equals(method.invoke(inner, e));
+                                } catch (ReflectiveOperationException ex) {
+                                    return false;
+                                }
+                            });
+                            if (taken) return true;
+                        }
+                        if ("dispatchKeyEvent".equals(method.getName())
+                                && args != null && args.length == 1 && args[0] instanceof android.view.KeyEvent
+                                && remote != null && remote.dispatch((android.view.KeyEvent) args[0], w, root)) {
+                            return true;
+                        }
                         if ("dispatchKeyEvent".equals(method.getName())
                                 && args[0] instanceof android.view.KeyEvent
                                 && ((android.view.KeyEvent) args[0]).getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
                             android.view.KeyEvent e = (android.view.KeyEvent) args[0];
                             // A press that began in full screen is ours to
                             // the end (the back callback may leave full
-                            // screen between its down and its up).
-                            if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) swallowBackKey = fullscreen;
+                            // screen between its down and its up). Not on
+                            // a TV: there back closes the player.
+                            if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) swallowBackKey = fullscreen && !tv;
                             if (swallowBackKey) {
                                 if (e.getAction() == android.view.KeyEvent.ACTION_UP) {
                                     swallowBackKey = false;
@@ -244,11 +494,19 @@ final class SystemControls {
                                 return true;
                             }
                         }
+                        Object result;
                         try {
-                            return method.invoke(inner, args);
+                            result = method.invoke(inner, args);
                         } catch (java.lang.reflect.InvocationTargetException ex) {
                             throw ex.getCause();
                         }
+                        if ("onWindowFocusChanged".equals(method.getName()) && remote != null) {
+                            // Focus went to another window (a dialog over
+                            // this one) or came back here.
+                            if (Boolean.TRUE.equals(args[0])) remote.settleFocus(root);
+                            wrapDialogs();
+                        }
+                        return result;
                     });
             w.setCallback(wrapped);
             guarded.add(root);

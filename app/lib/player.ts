@@ -1750,7 +1750,7 @@ export const PLAYER_BRIDGE = GUARD_JS + `(function () {
         el.thumb.style.left = (x / 10) + '%';
       });
     }
-    set('rem', d > 0 && isFinite(d) ? '−' + fmt(Math.max(0, d - t)) : '', function (s) { el.rem.textContent = s; });
+    set('rem', d > 0 && isFinite(d) ? fmt(Math.max(0, d - t)) : '', function (s) { el.rem.textContent = s; });
     set('spd', (Math.round(r * 100) / 100) + '×', function (s) { el.spd.textContent = s; });
     set('cc', cc, function (o) { el.cc.innerHTML = svg(o ? 'ccOn' : 'ccOff', 24); });
     set('mu', mu || vo === 0, function (m) { el.mu.innerHTML = svg(m ? 'mute' : 'vol', 22); });

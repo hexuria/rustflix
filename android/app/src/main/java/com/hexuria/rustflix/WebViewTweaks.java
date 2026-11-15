@@ -28,6 +28,9 @@ import java.util.WeakHashMap;
  *       {@code window.open} from an embed's ad scripts goes nowhere instead
  *       of replacing the player page
  *   <li>black before the page paints, and no default video poster
+ *   <li>no key focus while the TV remote's keys are captured
+ *       ({@link TvRemote}): a web view holding focus (the hidden resolver
+ *       is full screen, at opacity 0) would take the D-pad's keys
  * </ul>
  */
 final class WebViewTweaks {
@@ -179,8 +182,21 @@ final class WebViewTweaks {
         return false;
     }
 
+    /** Whether web views may take key focus: not while the remote's keys
+     * are captured (sys.keyCapture). Main thread. */
+    static void keyFocus(boolean on) {
+        for (WebView web : new java.util.ArrayList<>(done)) focusable(web, on);
+    }
+
+    private static void focusable(WebView web, boolean on) {
+        // A focused view that stops being focusable gives its focus up.
+        web.setFocusable(on);
+        web.setFocusableInTouchMode(on);
+    }
+
     private static void configure(WebView web) {
         web.setOnTouchListener(WebViewTweaks::onTouch);
+        if (TvRemote.capturing()) focusable(web, false);
         // NSH's client only answers media-capture requests: keep that, and
         // draw no default poster (a grey Android robot) for the posterless
         // <video> elements embed pages carry.

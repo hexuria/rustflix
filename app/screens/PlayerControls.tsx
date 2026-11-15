@@ -95,6 +95,7 @@ import { nativeFullscreenCapable, nativeFullscreenOn, nativePipActive } from "..
 import { sourcesFor, type MediaType } from "../lib/sources";
 import { downloadCurrent, type DlTarget } from "../lib/downloads";
 import { Button, DownloadButton } from "../lib/ui";
+import { onTvKey, tvFocus, tvMode, TvPressable, TvScope, tvTap, useFocusable } from "../lib/tv";
 import {
   getBrightness,
   getVolume,
@@ -114,6 +115,14 @@ export function fmtTime(sec: number): string {
   const mm = String(m).padStart(2, "0");
   const ss = String(s).padStart(2, "0");
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+}
+
+/** The least width (12 px text) the time-left label ("h:mm:ss", no sign)
+ * of a video this long keeps: wide enough for its longest reading, so the
+ * seek bar beside it does not change length as the digits tick. The label
+ * itself never wraps or shrinks; the bar gives way. */
+export function remainingWidth(durationSec: number): number {
+  return Math.ceil(fmtTime(durationSec).length * 7.4) + 2;
 }
 
 /** "1×", "1.25×". */
@@ -876,14 +885,17 @@ function slideEnd() {
 // --- Up next ----------------------------------------------------------------------------
 
 function CardBtn(props: { label: string; primary?: boolean; desktop?: boolean; onPress: () => void }) {
+  const tv = useFocusable({ onPress: () => props.onPress(), autoFocus: !!props.primary });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.label}
+      onMouseEnter={tv.onMouseEnter}
       onPress={props.onPress}
       class={`${props.desktop ? "min-h-9 cursor-pointer" : "min-h-11"} items-center justify-center rounded-full px-4 active:opacity-70 ${
         props.primary ? "bg-white hover:bg-zinc-200" : "border border-white/30 hover:bg-white/15"
-      }`}
+      } ${tv.focused() ? "outline-4 outline-offset-2 outline-white" : ""}`}
     >
       <Text class={`text-[13px] font-bold ${props.primary ? "text-black" : "text-white"}`}>{props.label}</Text>
     </View>
@@ -950,16 +962,21 @@ function IconBtn(props: {
    * close the open one. */
   keepPopup?: boolean;
 }) {
+  const press = () => {
+    if (!props.keepPopup) closePlayerPopups();
+    pokeControls();
+    props.onPress();
+  };
+  // TV: in the D-pad's focus while its row shows.
+  const tv = useFocusable({ onPress: press });
   return (
     <View
+      ref={tv.ref}
       role="button"
       accessibilityLabel={props.label}
-      onPress={() => {
-        if (!props.keepPopup) closePlayerPopups();
-        pokeControls();
-        props.onPress();
-      }}
-      class="h-11 w-11 items-center justify-center active:opacity-50"
+      onMouseEnter={tv.onMouseEnter}
+      onPress={press}
+      class={`h-11 w-11 items-center justify-center rounded-full active:opacity-50 ${tv.focused() ? tvFocus.row : ""}`}
     >
       <Glyph d={props.d} size={props.size ?? 24} />
     </View>
@@ -979,6 +996,76 @@ function FailedPanel() {
         </If>
         <View class="mt-3">
           <Button variant="primary" size="md" icon="retry" label="Try again" onPress={() => tryAgain()} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/** The centre play / pause button. TV: where the focus rests while the
+ * controls show: select toggles, left / right seek one step. */
+function CentrePlay(props: { busy: boolean }) {
+  const press = () => {
+    pokeControls();
+    togglePlay();
+  };
+  const tv = useFocusable({
+    onPress: press,
+    autoFocus: true,
+    onKey: (k) => {
+      if (k.action !== "down" || (k.key !== "left" && k.key !== "right")) return false;
+      if (!interactive()) return true;
+      pokeControls();
+      doubleTapSeek(k.key === "left" ? -1 : 1);
+      return true;
+    },
+  });
+  return (
+    <View
+      ref={tv.ref}
+      role="button"
+      accessibilityLabel={mediaPaused() ? "Play" : "Pause"}
+      onMouseEnter={tv.onMouseEnter}
+      onPress={press}
+      class={`h-20 w-20 items-center justify-center rounded-full active:opacity-50 ${tv.focused() ? tvFocus.row : ""}`}
+    >
+      <If when={props.busy}>
+        <Spinner size={48} />
+      </If>
+      <If when={!props.busy}>
+        <Glyph d={mediaPaused() ? "play" : "pause"} size={52} />
+      </If>
+    </View>
+  );
+}
+
+/** TV, while a source's own page plays (blind): the focus rests on the
+ * middle of the picture, where the page's play button is: select presses
+ * there (the host's `sys.tap`); up reaches Back and Sources. */
+function BlindStage() {
+  const size = signal({ w: 0, h: 0 });
+  const tv = useFocusable({
+    autoFocus: true,
+    onPress: () => {
+      const s = size();
+      if (s.w > 0) void tvTap(s.w / 2, s.h / 2);
+    },
+  });
+  return (
+    <View
+      class="pointer-events-none absolute inset-0 items-center justify-center"
+      onLayout={(e: { bounds: { size: { width: number; height: number } } }) =>
+        size.set({ w: e.bounds.size.width, h: e.bounds.size.height })
+      }
+    >
+      <View
+        ref={tv.ref}
+        class={`rounded-full ${tv.focused() ? "outline-2 outline-white/60" : ""}`}
+        style={{ width: 104, height: 104 }}
+      />
+      <View class="absolute inset-x-0 items-center" style={{ bottom: 40 }}>
+        <View class="rounded-full bg-black/70 px-4 py-2">
+          <Text class="text-sm font-semibold text-white">Press OK to play · Up for Back and Sources</Text>
         </View>
       </View>
     </View>
@@ -1019,6 +1106,72 @@ export function PhoneControls() {
     () => !mediaFullscreen() && !locked() && (chrome() || phase() === "failed"),
   );
   const popup = computed(() => (chrome() ? playerPopup() : null));
+
+  // TV: the remote on the picture. The media keys always; with the controls
+  // hidden, select plays / pauses (or takes Skip Intro / Up next), left and
+  // right seek, up and down bring the controls; with them showing the
+  // D-pad moves among them (the focus starts on play / pause, where left
+  // and right still seek) and every key keeps them up.
+  if (tvMode()) {
+    onTvKey(
+      (k) => {
+        if (k.action !== "down") return false;
+        const can = interactive();
+        switch (k.key) {
+          case "playpause":
+            if (can) {
+              togglePlay();
+              pokeControls();
+            }
+            return true;
+          case "play":
+            if (can && mediaPaused()) togglePlay();
+            if (can) pokeControls();
+            return true;
+          case "pause":
+          case "stop":
+            if (can && !mediaPaused()) togglePlay();
+            if (can) pokeControls();
+            return true;
+          case "rewind":
+            if (can) doubleTapSeek(-1);
+            return true;
+          case "forward":
+            if (can) doubleTapSeek(1);
+            return true;
+          case "next":
+            if (hasNext()) void nextEpisode();
+            return true;
+        }
+        if (!can || locked()) return false;
+        if (controlsVisible()) {
+          pokeControls();
+          return false;
+        }
+        if (k.key === "select") {
+          if (k.repeat > 0) return true;
+          const card = upNextCard();
+          if (card) upNextAction(card.primary.id);
+          else if (skipPill()) skipPillPress();
+          else {
+            togglePlay();
+            pokeControls();
+          }
+          return true;
+        }
+        if (k.key === "left" || k.key === "right") {
+          doubleTapSeek(k.key === "left" ? -1 : 1);
+          return true;
+        }
+        if (k.key === "up" || k.key === "down") {
+          pokeControls();
+          return true;
+        }
+        return false;
+      },
+      { scoped: true },
+    );
+  }
 
   // The page draws the captions: they sit above the seek row while the
   // bottom bar shows, and drop back when it hides (locked, hidden, blind,
@@ -1095,7 +1248,7 @@ export function PhoneControls() {
           </Text>
         </If>
       </View>
-      <If when={!slim && pipSupported() && canPlay()}>
+      <If when={!tvMode() && !slim && pipSupported() && canPlay()}>
         <IconBtn d="pip" label="Picture in picture" onPress={enterPip} size={22} />
       </If>
       <IconBtn d="sources" label="Sources" onPress={openSources} size={22} />
@@ -1103,7 +1256,7 @@ export function PhoneControls() {
           which way); iPhone: AVKit's full screen (enterFullscreen). */}
       {/* iPhone with the app's player: only when the component has its
           own full screen (the dialog already fills the screen). */}
-      <If when={!slim && canPlay() && (platform.os !== "ios" || !nativeActive() || nativeFullscreenCapable())}>
+      <If when={!tvMode() && !slim && canPlay() && (platform.os !== "ios" || !nativeActive() || nativeFullscreenCapable())}>
         <IconBtn
           d={fsOn() ? "fullscreenExit" : "fullscreen"}
           label={fsOn() ? "Exit full screen" : "Full screen"}
@@ -1143,14 +1296,16 @@ export function PhoneControls() {
     >
       <View class="flex-row items-center gap-2" style={{ pointerEvents: "box-none" }}>
         <TouchSeekBar onActive={noteSeekDrag} />
-        <Text class="w-14 text-right text-xs font-medium text-white">
-          {`−${fmtTime(Math.max(0, duration() - position()))}`}
+        <Text
+          class="text-right text-xs font-medium text-white"
+          style={{ flexShrink: 0, numberOfLines: 1, minWidth: remainingWidth(duration()) }}
+        >
+          {fmtTime(Math.max(0, duration() - position()))}
         </Text>
       </View>
       <View class="-mx-2 flex-row items-center gap-3" style={{ pointerEvents: "box-none" }}>
-        <View
-          role="button"
-          accessibilityLabel="Playback speed"
+        <TvPressable
+          label="Playback speed"
           onPress={() => {
             pokeControls();
             toggleSpeedList();
@@ -1160,17 +1315,20 @@ export function PhoneControls() {
           }`}
         >
           <Text class="text-[15px] font-bold text-white">{rateLabel(mediaRate())}</Text>
-        </View>
-        <IconBtn
-          d="unlock"
-          label="Lock controls"
-          onPress={() => {
-            locked.set(true);
-            hideControls();
-            flashHint("Locked — hold to unlock");
-          }}
-          size={24}
-        />
+        </TvPressable>
+        {/* The lock is against stray touches: not on a TV. */}
+        <If when={!tvMode()}>
+          <IconBtn
+            d="unlock"
+            label="Lock controls"
+            onPress={() => {
+              locked.set(true);
+              hideControls();
+              flashHint("Locked — hold to unlock");
+            }}
+            size={24}
+          />
+        </If>
         {/* Speed and lock at the left; the rest at the right. */}
         <View class="flex-1" />
         <IconBtn
@@ -1237,6 +1395,9 @@ export function PhoneControls() {
         <View class="absolute inset-0" style={{ pointerEvents: "box-none" }}>
           {topScrim(64)}
           {topRow(true)}
+          <If when={tvMode()}>
+            <BlindStage />
+          </If>
         </View>
       </If>
       <If when={!blind()}>
@@ -1413,22 +1574,7 @@ export function PhoneControls() {
             >
               <SeekIcon dir={-1} size={40} />
             </View>
-            <View
-              role="button"
-              accessibilityLabel={mediaPaused() ? "Play" : "Pause"}
-              onPress={() => {
-                pokeControls();
-                togglePlay();
-              }}
-              class="h-20 w-20 items-center justify-center active:opacity-50"
-            >
-              <If when={busy()}>
-                <Spinner size={48} />
-              </If>
-              <If when={!busy()}>
-                <Glyph d={mediaPaused() ? "play" : "pause"} size={52} />
-              </If>
-            </View>
+            <CentrePlay busy={busy()} />
             <View
               role="button"
               accessibilityLabel={`Forward ${seekStep()} seconds`}
@@ -1466,8 +1612,7 @@ export function PhoneControls() {
               bottom: chrome() ? barH() + 8 : padB() + 16,
             }}
           >
-            <View
-              role="button"
+            <TvPressable
               onPress={() => {
                 skipPillPress();
                 if (controlsVisible()) armHide();
@@ -1475,7 +1620,7 @@ export function PhoneControls() {
               class="min-h-11 items-center justify-center rounded-md border border-white/70 bg-black/55 px-5 active:opacity-70"
             >
               <Text class="text-sm font-bold text-white">{skipPill()?.label ?? ""}</Text>
-            </View>
+            </TvPressable>
           </View>
         </If>
 
@@ -1490,7 +1635,9 @@ export function PhoneControls() {
               bottom: barH() + 4,
             }}
           >
-            <AudioSubsPanel />
+            <TvScope onBack={closePlayerPopups}>
+              <AudioSubsPanel />
+            </TvScope>
           </View>
         </If>
         <If when={popup() === "speed"}>
@@ -1498,7 +1645,9 @@ export function PhoneControls() {
             class="absolute"
             style={{ left: padL() - 8, bottom: padB() + 48 }}
           >
-            <SpeedList />
+            <TvScope onBack={closePlayerPopups}>
+              <SpeedList />
+            </TvScope>
           </View>
         </If>
         </View>
@@ -1920,8 +2069,8 @@ export function DesktopControls(props: { inert?: boolean; spinning?: boolean }) 
               }}
               bubble={(f) => fmtTime(f * dur())}
             />
-            <Text style={{ fontSize: 12, fontWeight: "500", color: "#e4e4e7", minWidth: 56, textAlign: "right", textShadow: "0 1px 3px rgba(0,0,0,0.6)" }}>
-              {dur() > 0 && !inert ? `−${fmtTime(Math.max(0, dur() - position()))}` : ""}
+            <Text style={{ fontSize: 12, fontWeight: "500", color: "#e4e4e7", minWidth: Math.max(56, remainingWidth(dur())), flexShrink: 0, numberOfLines: 1, textAlign: "right", textShadow: "0 1px 3px rgba(0,0,0,0.6)" }}>
+              {dur() > 0 && !inert ? fmtTime(Math.max(0, dur() - position())) : ""}
             </Text>
           </View>
           <View class="flex-row items-center" style={{ gap: 4, marginTop: 6, pointerEvents: "box-none" }}>

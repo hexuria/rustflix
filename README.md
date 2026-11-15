@@ -1,7 +1,8 @@
 # rustflix
 
 A native app for browsing and watching movies, TV and anime on macOS,
-iPhone/iPad and Android, built from one TSX interface.
+iPhone/iPad and Android (phones, and Android TV / Google TV with the
+remote), built from one TSX interface.
 
 <img alt="rustflix on macOS, iPhone and Android" src="https://github.com/user-attachments/assets/ec9af80f-b955-43b6-ab6f-cc327068f3fa" width="100%" />
 

@@ -6,6 +6,10 @@
 //! TMDB client, library storage, the WebView/Video player). The host
 //! only chooses the window and serves `nsh/base`.
 
+// A GUI app: no console window on Windows. stdout/stderr still reach
+// whatever handles the launcher gave us (CI, `gui.ps1`'s redirect).
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 
 use nsh_engine::HostChannel;

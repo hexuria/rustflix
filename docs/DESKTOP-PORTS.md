@@ -79,10 +79,12 @@ modes):
 
 Not verified / known problems:
 
-- **Real streaming sources were not tested** — the hidden resolver
-  webview hits Cloudflare on cloud machines (milestone 4). Playback
-  was verified through `dl.stream.open` directly and through finished
-  downloads.
+- **Real embed playback end-to-end was not achieved here** — the
+  resolver finds real HLS URLs (milestone 4), but every tested CDN
+  answers 403 even to the resolver WebView's own fetch (see the CDN
+  note under milestone 4): this datacenter egress is refused. Playback
+  itself is verified through `dl.stream.open` on public media and
+  through finished downloads.
 - `maxResolution` is stored but does not yet cap the decode size.
 - `rate` is applied through `gst_element_seek`'s rate argument; sinks
   that cannot follow it keep their rate.
@@ -226,8 +228,10 @@ the app stays up.
   caption buttons, `windowDrag` moves via `_NET_WM_MOVERESIZE`,
   double-click zooms, and `Window.toggleFullScreen` maps to GPUI's
   fullscreen. Verified live under XFCE on X11: minimize, maximize,
-  restore, close and title-bar drag all work; fullscreen shares the
-  same GPUI path but was not separately exercised.
+  restore, close, title-bar drag, and fullscreen (F11 →
+  `_NET_WM_STATE_FULLSCREEN`, 1920×1080, toggles back cleanly).
+  Xwayland itself was not exercised — this machine has no Wayland
+  session; under Wayland the same X11 path runs through Xwayland.
 - **M8 packaging**: the Linux workflow job now tars the runnable
   folder (`rustflix-linux-x86_64.tar.gz`, binary + `nsh/` bundle) and
   uploads it as the `rustflix-linux-x86_64` artifact. System packages

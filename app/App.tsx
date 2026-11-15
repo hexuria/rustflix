@@ -210,9 +210,10 @@ function TitleBar() {
           <ChromeButton icon="back" label="Back" onPress={exitPlayer} />
         </If>
         <View class="flex-1" />
-        <If when={isPlayer()}>
+        <If when={isPlayer() && playerPhase() !== "failed"}>
           {/* The playing video's download (the page's own controls have
-              none on the desktop). */}
+              none on the desktop). Hidden on the failure screen: there
+              is no video to save. */}
           <DownloadButton
             target={() => playerDlTarget()}
             compact
@@ -1086,7 +1087,10 @@ export function App() {
         nextEpisode: { run: () => void nextEpisode(), enabled: () => route().name === "player" },
         prevEpisode: { run: () => void prevEpisode(), enabled: () => route().name === "player" },
         sources: () => openSources(),
-        download: { run: () => void downloadCurrent(), enabled: () => route().name === "player" },
+        download: {
+          run: () => void downloadCurrent(),
+          enabled: () => route().name === "player" && playerPhase() !== "failed",
+        },
         episodes: {
           run: () => openEpisodes(),
           enabled: () => {

@@ -44,6 +44,7 @@ import {
   canDownload,
   cancelDownload,
   downloadFor,
+  downloadList,
   enqueueDownload,
   playDownload,
   refreshDownloadSpace,
@@ -1202,9 +1203,22 @@ export function DownloadThumb(props: {
   );
 }
 
-/** The entry for a target right now (not tracked). */
+/** The entry for a target. It reads the download list as its caller does:
+ *  inside a `computed` the result follows the download's state. */
+function entryFor(t: DlTarget): DlEntry | null {
+  // A DlEntry knows its native id — identity-less downloads (`native:`/
+  // `legacy:` keys) have no key a route target can rebuild.
+  const id = (t as Partial<DlEntry>).dlId;
+  if (typeof id === "number") {
+    const e = downloadList().find((x) => x.dlId === id);
+    if (e) return e;
+  }
+  return downloadFor(t.type, t.id, t.season, t.episode);
+}
+
+/** The entry for a target right now (not tracked): for event handlers. */
 function liveEntry(t: DlTarget): DlEntry | null {
-  return untracked(() => downloadFor(t.type, t.id, t.season, t.episode));
+  return untracked(() => entryFor(t));
 }
 
 function targetKey(t: DlTarget): string {
@@ -1572,7 +1586,7 @@ export function DownloadButton(props: {
   );
   const entry = computed(() => {
     const t = target();
-    return t ? downloadFor(t.type, t.id, t.season, t.episode) : null;
+    return t ? entryFor(t) : null;
   });
   const s = props.size ?? 24;
   const hit = props.compact ? 28 : desktop ? s + 12 : Math.max(44, s + 12);
@@ -1666,7 +1680,7 @@ export function DownloadAction(props: {
 }) {
   const entry = computed(() => {
     const t = props.target();
-    return t ? downloadFor(t.type, t.id, t.season, t.episode) : null;
+    return t ? entryFor(t) : null;
   });
   const label = computed(() => {
     const e = entry();

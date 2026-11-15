@@ -11,7 +11,12 @@
 //   60000; "rect": {x, y, width, height} of the picture in window points,
 //   default 40, 80, 960×540 — e.g. the whole window to measure paint cost;
 //   "download": a finished download's id — plays its `dl.playUrl` `src`
-//   in the same component instead of resolving)
+//   in the same component instead of resolving; "playdownload": a finished
+//   download's id — the real Downloads → Play path: `playDownload`, the
+//   player route, `localPage`, the native player — recording the route,
+//   phase, URL origin and failure line; with "failcheck": true it then
+//   plays a title under `rustflix.failsources`="all" and checks
+//   `downloadCurrent` refuses on the failure screen)
 // It resolves, opens a proxy session, shows the video MUTED, then records
 // to Storage `rustflix.nativetest.result` (rewritten after every step, so
 // a run that stops midway still leaves what it got):
@@ -147,7 +152,7 @@ export async function runNativeTest() {
     await save();
     return;
   }
-  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number };
+  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; playdownload?: number; failcheck?: boolean; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
   try {
     req = JSON.parse(raw);
   } catch (e) {
@@ -157,6 +162,79 @@ export async function runNativeTest() {
     return;
   }
   result.request = req;
+  if (typeof req.playdownload === "number") {
+    // A finished download played through the real path — Downloads → Play
+    // → the player route → lib/downloads `localPage` → the native player.
+    // Records what the player decided (route, phase, URL origin, the
+    // failure line) instead of mounting the debug picture.
+    const { playDownload } = await import("../lib/downloads");
+    const pl = await import("../lib/player");
+    step(`play download ${req.playdownload}`);
+    playDownload(req.playdownload);
+    result.playdownload = { samples: [] as any[] };
+    const until = Date.now() + 60000;
+    while (Date.now() < until) {
+      await sleep(500);
+      const r = pl.playerRoute();
+      const snap = {
+        t: Date.now() - t0,
+        route: r ? `${r.type}:${r.id}${r.dl != null ? ` dl=${r.dl}` : ""}` : null,
+        phase: pl.playerPhase(),
+        fail: pl.failState()?.reason ?? null,
+        url: originOf(pl.playerUrl()),
+        preparing: pl.localPreparing(),
+      };
+      result.playdownload.samples.push(snap);
+      if (snap.phase === "playing" && String(snap.url).startsWith("http://127.0.0.1")) {
+        step("local playback confirmed");
+        break;
+      }
+      if (snap.phase === "failed") {
+        step(`player failed: ${snap.fail}`);
+        break;
+      }
+    }
+    // The title-bar download button on this route: a `dl` route is the
+    // file itself — downloadCurrent must say "already downloaded", not
+    // enqueue a phantom title.
+    const dl = await import("../lib/downloads");
+    const dc = dl.downloadCurrent();
+    result.playdownload.downloadCurrent = {
+      returned: dc ? { dlId: dc.dlId, key: dc.key, state: dc.state } : null,
+      entries: dl.downloadList().map((x) => ({ dlId: x.dlId, key: x.key, state: x.state })),
+    };
+    result.playdownload.players = await hostCall("sys.nativePlayers");
+    if (req.failcheck) {
+      // The failure screen (`rustflix.failsources` = "all" makes every
+      // source fail): the download control must refuse, not enqueue.
+      const { navigate } = await import("../lib/router");
+      step("failcheck: play a forced-fail title");
+      navigate({ name: "player", type: "movie", id: 550, title: "failcheck" });
+      const until2 = Date.now() + 240000;
+      while (Date.now() < until2 && pl.playerPhase() !== "failed") await sleep(1000);
+      result.playdownload.failcheck = {
+        phase: pl.playerPhase(),
+        fail: pl.failState()?.reason ?? null,
+      };
+      if (pl.playerPhase() === "failed") {
+        const dc2 = dl.downloadCurrent();
+        result.playdownload.failcheck.downloadCurrent = dc2
+          ? { dlId: dc2.dlId, key: dc2.key, state: dc2.state }
+          : null;
+        result.playdownload.failcheck.entries = dl.downloadList().map((x) => ({
+          dlId: x.dlId,
+          key: x.key,
+          state: x.state,
+        }));
+        step(`failcheck: downloadCurrent → ${dc2 ? `entry ${dc2.dlId} (${dc2.state})` : "refused"}`);
+      } else {
+        step(`failcheck: never reached failed (phase ${pl.playerPhase()})`);
+      }
+    }
+    result.done = result.finished = true;
+    await save();
+    return;
+  }
   const holdMs = typeof req.holdMs === "number" ? req.holdMs : 60000;
   const r0 = { ...DEFAULT_RECT, ...(req.rect ?? {}) };
   if ([r0.x, r0.y, r0.width, r0.height].every((n) => typeof n === "number" && Number.isFinite(n)) && r0.width > 0 && r0.height > 0) rect.set(r0);
@@ -204,6 +282,16 @@ export async function runNativeTest() {
       if (typeof p?.src !== "string") throw new Error(`dl.playUrl: no src (${JSON.stringify(p)})`);
       s = { sid: "", url: p.src };
       result.downloadSrc = p.src.replace(/:\d+\//, ":<port>/");
+    } else if (req.stream?.url) {
+      // A direct `dl.stream.open` session (public test stream): the
+      // proxy path without a resolver — real sources need the hidden
+      // web view, which Cloudflare blocks on cloud machines.
+      step(`open proxy session directly (${req.stream.kind ?? "hls"})`);
+      const opened = await openStream(req.stream.url, (req.stream.kind === "file" ? "file" : "hls") as "hls" | "file", req.stream.headers ?? {});
+      if ("error" in opened) throw new Error(`dl.stream.open: ${opened.error}`);
+      s = opened;
+      sid = s.sid;
+      result.proxyUrl = s.url.replace(/\/[0-9a-f]{32}\//, "/<token>/");
     } else {
     // 1. Resolve in the hidden web view.
     step("resolve");
@@ -291,6 +379,26 @@ export async function runNativeTest() {
     // Only a fatal error ends the run (contract §1.5); others are notes.
     const err = events.find((e) => e.name === "error" && e.d?.fatal === true);
     if (err) throw new Error(`player: ${err.d?.message}`);
+
+    // 3b. Track selection: another audio track and a subtitle, when the
+    // media has them. The cues event proves the text path end to end.
+    const audioTracks: any[] = load?.d?.audioTracks ?? [];
+    const subtitleTracks: any[] = load?.d?.subtitleTracks ?? [];
+    if (audioTracks.length > 1 && handle !== null) {
+      step(`tracks: select audio ${audioTracks[1].id}`);
+      const from = events.length;
+      await controlVideo(handle, { selectAudio: audioTracks[1].id });
+      const tr = await waitFor("tracks", from, 5000);
+      result.trackSelect = { audio: tr?.d ?? null };
+    }
+    if (subtitleTracks.length > 0 && handle !== null) {
+      step(`tracks: select subtitle ${subtitleTracks[0].id}`);
+      const from = events.length;
+      await controlVideo(handle, { selectSubtitle: subtitleTracks[0].id });
+      const tr = await waitFor("tracks", from, 5000);
+      const cue = await waitFor("cues", from, 10000, (d) => Array.isArray(d?.lines) && d.lines.length > 0);
+      result.trackSelect = { ...(result.trackSelect ?? {}), subtitle: tr?.d ?? null, cue: cue?.d ?? null };
+    }
 
     // 4. Seeks.
     if (duration && duration > 30) {
@@ -433,6 +541,9 @@ export function NativePlayerDebug() {
           onProgress={(d) => record("progress", d)}
           onBuffer={(d) => record("buffer", d)}
           onSeeked={(d) => record("seeked", d)}
+          onTracks={(d) => record("tracks", d)}
+          onCues={(d) => record("cues", d)}
+          onRate={(d) => record("rate", d)}
           onEnd={(d) => record("end", d)}
           onError={(d) => record("error", d)}
         />

@@ -22,7 +22,7 @@
 // is the one screen App.tsx mounts that may import it, and player.ts
 // cannot import it (downloads.ts imports player.ts).
 
-import { cleanup, View, WebView } from "nsh";
+import { cleanup, platform, View, WebView } from "nsh";
 import { webBackground } from "../lib/system";
 import { downloadEngineLoaded } from "../lib/downloads";
 import {
@@ -38,27 +38,48 @@ function HiddenView() {
   // Only when the view itself goes (a crash path, the window recreated):
   // lib/resolver.ts makes it again once the app is active.
   cleanup(resolverHostGone);
+  const web = (
+    <WebView
+      ref={(node) => setResolverRef(node)}
+      src="about:blank"
+      class="flex-1 bg-black"
+      style={{ backgroundColor: "#000" }}
+      userAgent={RESOLVER_UA}
+      injectedJavaScriptBeforeContentLoaded={RESOLVER_BRIDGE}
+      onMessage={(e: { data: unknown }) => resolverEvent("message", e)}
+      onLoadStart={(e: unknown) => {
+        // macOS: never a white web view (it is hidden, but cheap).
+        webBackground();
+        resolverEvent("loadStart", e);
+      }}
+      onLoad={(e: unknown) => resolverEvent("load", e)}
+      onError={(e: unknown) => resolverEvent("error", e)}
+    />
+  );
+  // Linux: an opacity-0 ancestor gives the web view NO geometry, and wry
+  // only calls set_bounds while a view is shown — WebKitGTK then lays the
+  // page out at its ~200x200 default, embed players never start and the
+  // resolver finds nothing. Instead give the view a real 1600x900 box
+  // clipped to a 1x1 visible sliver: NSH places the web view at the whole
+  // box (a real viewport) while the composition surface shows 1 px.
+  if (platform.os === "linux") {
+    return (
+      <View
+        class="pointer-events-none absolute overflow-hidden"
+        style={{ left: 0, top: 0, width: 1, height: 1 }}
+      >
+        <View class="absolute" style={{ left: 0, top: 0, width: 1600, height: 900 }}>
+          {web}
+        </View>
+      </View>
+    );
+  }
   return (
     <View
       class="pointer-events-none absolute"
       style={{ left: 0, top: 0, right: 0, bottom: 0, opacity: 0 }}
     >
-      <WebView
-        ref={(node) => setResolverRef(node)}
-        src="about:blank"
-        class="flex-1 bg-black"
-        style={{ backgroundColor: "#000" }}
-        userAgent={RESOLVER_UA}
-        injectedJavaScriptBeforeContentLoaded={RESOLVER_BRIDGE}
-        onMessage={(e: { data: unknown }) => resolverEvent("message", e)}
-        onLoadStart={(e: unknown) => {
-          // macOS: never a white web view (it is hidden, but cheap).
-          webBackground();
-          resolverEvent("loadStart", e);
-        }}
-        onLoad={(e: unknown) => resolverEvent("load", e)}
-        onError={(e: unknown) => resolverEvent("error", e)}
-      />
+      {web}
     </View>
   );
 }

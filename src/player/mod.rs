@@ -19,6 +19,8 @@
 pub(crate) mod av;
 #[cfg(target_os = "macos")]
 mod component;
+#[cfg(target_os = "linux")]
+mod linux;
 
 use nsh_engine::HostChannel;
 use nsh_platform_gpui::Components;
@@ -26,11 +28,14 @@ use nsh_platform_gpui::Components;
 /// The component's name in `nativeComponent(...)`.
 pub(crate) const NAME: &str = "rustflix.video";
 
-/// Registers `rustflix.video` (macOS; elsewhere it renders an empty view).
+/// Registers `rustflix.video` (macOS, Linux; elsewhere it renders an
+/// empty view).
 pub(crate) fn register(components: &Components) {
     #[cfg(target_os = "macos")]
     components.register(NAME, std::rc::Rc::new(|cx| Box::new(component::Video::new(cx))));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    components.register(NAME, std::rc::Rc::new(|cx| Box::new(linux::component::Video::new(cx))));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = components;
 }
 
@@ -41,19 +46,22 @@ pub(crate) fn register_host(host: &HostChannel) {
     // downloader's 127.0.0.1 server (`…/<token>/<id>/<file>`, Range + HLS).
     host.handle("sys.nativeVideoInfo", |call| {
         let info = |pip: bool| {
-            let available = cfg!(target_os = "macos");
+            let available = cfg!(any(target_os = "macos", target_os = "linux"));
             serde_json::json!({
                 "ok": true, "available": available, "version": 1,
-                "pip": pip, "fullscreen": false, "local": available, "nowPlaying": available,
+                "pip": pip, "fullscreen": false, "local": available, "nowPlaying": cfg!(target_os = "macos"),
                 // The stream's own subtitle tracks come out as `cues` events
-                // (an AVPlayerItemLegibleOutput) for the app to draw.
+                // (an AVPlayerItemLegibleOutput on macOS, the text appsink's
+                // buffers on Linux) for the app to draw.
                 "embeddedSubtitles": available, "subtitleCues": available,
             })
         };
         #[cfg(target_os = "macos")]
         // AVKit is asked on the main thread.
         dispatch2::DispatchQueue::main().exec_async(move || call.resolve(info(av::pip_supported())));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        call.resolve(info(linux::pip_supported()));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         call.resolve(info(false));
     });
     host.handle("sys.nativeVideo", |call| {
@@ -66,7 +74,14 @@ pub(crate) fn register_host(host: &HostChannel) {
                 call.resolve(serde_json::json!({ "ok": ok }));
             });
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let data = call.data().clone();
+            // GStreamer element calls are thread-safe; no main-thread hop.
+            let ok = data.get("handle").and_then(serde_json::Value::as_u64).is_some_and(|h| linux::control(h, &data));
+            call.resolve(serde_json::json!({ "ok": ok }));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         call.resolve(serde_json::json!({ "ok": false }));
     });
     host.handle("sys.nativePlayers", |call| {
@@ -75,7 +90,12 @@ pub(crate) fn register_host(host: &HostChannel) {
             av::LIVE.load(std::sync::atomic::Ordering::Relaxed),
             av::PLAYING.load(std::sync::atomic::Ordering::Relaxed),
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let (live, playing) = (
+            linux::LIVE.load(std::sync::atomic::Ordering::Relaxed),
+            linux::PLAYING.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let (live, playing) = (0usize, 0usize);
         call.resolve(serde_json::json!({ "ok": true, "live": live, "playing": playing }));
     });

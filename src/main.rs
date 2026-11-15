@@ -14,6 +14,8 @@ use nsh_platform_gpui::{AppOptions, AppSource, AssetBase, Bundle};
 mod dl;
 mod appkit;
 mod webguard;
+#[cfg(target_os = "linux")]
+mod webkitgtk;
 mod perf;
 mod player;
 mod stream;
@@ -712,7 +714,43 @@ mod files {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    mod os {
+        use std::path::Path;
+
+        /// Freedesktop Trash through `gio trash` (the same Trash the file
+        /// manager uses). Permanent deletion only when there is no `gio`
+        /// to run: a `gio` that ran and failed (no Trash on that mount, no
+        /// permission) leaves the file where it is and reports failure.
+        pub(super) fn trash(path: &Path) -> bool {
+            let ran = std::process::Command::new("gio")
+                .arg("trash")
+                .arg(path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match ran {
+                Ok(status) => status.success(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::symlink_metadata(path) {
+                        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path).is_ok(),
+                        Ok(_) => std::fs::remove_file(path).is_ok(),
+                        Err(_) => false,
+                    }
+                }
+                Err(_) => false,
+            }
+        }
+
+        pub(super) fn reveal(path: &Path) -> bool {
+            std::process::Command::new("xdg-open")
+                .arg(path.parent().unwrap_or(path))
+                .spawn()
+                .is_ok()
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     mod os {
         use std::path::Path;
 

@@ -2944,6 +2944,15 @@ const reloadBlank = signal(false);
 const nativeTried = signal<string[]>([]);
 /** A finished download that failed in the app's player: its local page. */
 const localWeb = signal(false);
+/** The play (`playKey`) that started from its source, not from a download:
+ * it stays on the source until it fails or is left, even when the download
+ * of the same title finishes meanwhile. Switching to the file mid-play
+ * stopped the picture and started it over. "" otherwise. */
+const streaming = signal("");
+
+function playKey(r: PlayerRoute): string {
+  return `${routeKey(r)}:${r.lang ?? ""}`;
+}
 /** The next native failure counts toward learning (false: a cold-start
  * timeout / a resolve still progressing, see PlaySession). */
 let failLearn = true;
@@ -3032,6 +3041,12 @@ function syncSrc() {
 function newEpoch() {
   closeNative();
   if (playerPhase() === "failed") return;
+  // A play from the source stays there (see `streaming`).
+  const pr = playerRoute();
+  if (pr && epochUrl && !isLocalUrl(epochUrl)) {
+    const k = playKey(pr);
+    if (untracked(streaming) !== k) streaming.set(k);
+  }
   clearStreams();
   playerPhase.set("loading");
   epochAt = Date.now();
@@ -3161,6 +3176,16 @@ function fail(kind: "start" | "stall", why: string) {
   const learnThis = failLearn;
   failLearn = true;
   debug("phase: source failed", { src: cur, kind, why, backend: epochBackend, ms: Date.now() - epochAt });
+  // The stream failed and this title's download finished while it played:
+  // the downloaded copy, from where the stream stopped (no other source).
+  if (!isLocalUrl(epochUrl) && untracked(streaming) === playKey(r) && downloadedPage(r) !== null) {
+    debug("phase: on to the finished download");
+    if (wasNative) closeNative();
+    streaming.set("");
+    carryPosition();
+    syncSrc();
+    return;
+  }
   if (wasNative) {
     closeNative();
     // A download that the app's player could not play: its local page.
@@ -3317,6 +3342,8 @@ export function tryAgain() {
   triedSources.clear();
   nativeTried.set([]);
   localWeb.set(false);
+  // A download that finished meanwhile is the first thing to try.
+  streaming.set("");
   failState.set(null);
   switchNotice.set("");
   carryPosition();
@@ -5211,11 +5238,25 @@ export function streamHeaderMap(
 /** The local page for this route's finished download (lib/downloads.ts):
  * a URL, "" while it is being prepared, null when there is none. */
 function localPageFor(r: PlayerRoute): string | null {
+  // Not while this play streams from its source (see `streaming`).
+  if (streaming() === playKey(r)) return null;
+  return downloadedPage(r);
+}
+
+/** The same, whatever is playing. */
+function downloadedPage(r: PlayerRoute): string | null {
   try {
     return dlHooks ? dlHooks.localPage(r) : null;
   } catch {
     return null;
   }
+}
+
+/** The player waits for a finished download's local page (it has no URL
+ * meanwhile): "Preparing your download…". Never in the terminal state. */
+export function localPreparing(): boolean {
+  const r = playerRoute();
+  return !!r && !failState() && playerPhase() !== "failed" && localPageFor(r) === "";
 }
 
 /** Deprecated: `revealDownload(dlId)` from lib/downloads.ts. */
@@ -6177,6 +6218,7 @@ function startPlayerInner() {
   triedSources.clear();
   nativeTried.set([]);
   localWeb.set(false);
+  streaming.set("");
   closeNative();
   prefetchKey = "";
   sourceOverride.set(null);

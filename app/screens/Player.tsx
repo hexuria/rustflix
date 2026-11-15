@@ -54,6 +54,7 @@ import {
   pipSupported,
   enterPip,
   playerPhase,
+  localPreparing,
   position,
   duration,
   seekStep,
@@ -92,7 +93,6 @@ import { PLAYER_SOURCES } from "../lib/sources";
 import { motionReduced, settings } from "../lib/store";
 import { Captions } from "./Captions";
 import { focusContent, restoreBrightness, webBackground } from "../lib/system";
-import { downloadFor } from "../lib/downloads";
 import { Button } from "../lib/ui";
 import { closeEpisodes, EpisodePicker, openEpisodes, showEpisodes } from "./EpisodePicker";
 import { openSources, SourcePicker } from "./SourcePicker";
@@ -585,15 +585,9 @@ export function Player() {
     }
   }
   // A finished download with no URL yet: its local page is being prepared
-  // (the engine leaves the URL empty meanwhile; not a failure).
-  const preparing = computed(() => {
-    const r = playerRoute();
-    if (!r || playerUrl()) return false;
-    const e = downloadFor(r.type, r.id, r.season, r.episode);
-    return (
-      e?.state === "done" && (r.type !== "anime" || (e.lang ?? "sub") === (r.lang ?? "sub"))
-    );
-  });
+  // (the engine leaves the URL empty meanwhile; not a failure). Not in the
+  // terminal state: its panel has the screen (the note sat on Try again).
+  const preparing = computed(() => !playerUrl() && localPreparing());
 
   // Fresh playback: flash the chrome once, then let the hide timer run.
   let shownFor = "";

@@ -76,6 +76,11 @@ impl Server {
     pub(crate) fn player_url(&self, id: u64, file: &str) -> String {
         format!("http://127.0.0.1:{}/{}/{id}/{PLAYER_PAGE}?f={}", self.port, self.token, encode(file))
     }
+
+    /// The media file itself of record `id` (for `rustflix.video`).
+    pub(crate) fn media_url(&self, id: u64, file: &str) -> String {
+        format!("http://127.0.0.1:{}/{}/{id}/{}", self.port, self.token, encode(file))
+    }
 }
 
 /// Percent-encodes everything but unreserved characters.

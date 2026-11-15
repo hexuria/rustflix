@@ -63,6 +63,10 @@ export type Route =
       poster?: string;
       lang?: "sub" | "dub";
       next?: { season?: number; episode?: number };
+      /** A finished download's native id, for downloads with no title
+       * identity of their own (added files: `native:`/`legacy:` keys) —
+       * lib/downloads.ts `localPage` matches it when the key cannot. */
+      dl?: number;
     };
 
 /** A frame on screen, in points. */

@@ -593,7 +593,7 @@ impl Manager {
             }
         }
         let s = srv.as_ref().expect("started");
-        json!({ "ok": true, "url": s.player_url(id, &served.file) })
+        json!({ "ok": true, "url": s.player_url(id, &served.file), "src": s.media_url(id, &served.file) })
     }
 
     pub(crate) fn reveal(&self, data: &Value) -> Value {

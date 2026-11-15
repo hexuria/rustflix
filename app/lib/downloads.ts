@@ -37,6 +37,7 @@ import {
   notify,
   onEpisodeWatched,
   onStreamLink,
+  playerPhase,
   playerRoute,
   playerTitle,
   refreshStreams,
@@ -68,6 +69,10 @@ export type DlTarget = {
   episodeName?: string;
   poster?: string;
   still?: string;
+  /** Set when the target *is* a finished download with no media identity
+   * (`native:`/`legacy:` keys): lets lookups find it by id. Never an
+   * identity for a new entry — `cleanTarget` drops it. */
+  dlId?: number;
 };
 export type DlEntry = DlTarget & {
   dlId: number;
@@ -798,6 +803,20 @@ export function downloadCurrent(): DlEntry | null {
     notify("Downloads aren't available here", "error");
     return null;
   }
+  // Nothing is playing (every source failed): there is no link to save.
+  if (playerPhase() === "failed") {
+    notify("Nothing is playing to download", "info");
+    return null;
+  }
+  // A route carrying a download's id plays that file — it is already
+  // downloaded (identity-less entries have no key to find it by).
+  if (typeof r.dl === "number") {
+    const done = get(r.dl);
+    if (done?.state === "done") {
+      notify(`${done.name} is already downloaded`, "info");
+      return done;
+    }
+  }
   const ep = r.type !== "movie" ? playerEpisodes().find((x) => x.n === (r.episode ?? 1)) : undefined;
   const target: DlTarget = {
     type: r.type,
@@ -972,6 +991,10 @@ export function playDownload(dlId: number): void {
     void host.call("dl.play", { id: e.dlId }).catch(() => {});
     return;
   }
+  // A download with no title identity (added files: `native:`/`legacy:`
+  // keys) cannot be found by the route's key — carry its native id so
+  // `localPage` can still match it.
+  const loose = e.key.startsWith("native:") || e.key.startsWith("legacy:");
   navigate({
     name: "player",
     type: e.type,
@@ -981,6 +1004,7 @@ export function playDownload(dlId: number): void {
     title: e.title,
     poster: e.poster,
     lang: e.type === "anime" ? e.lang : undefined,
+    dl: loose ? e.dlId : undefined,
   });
 }
 
@@ -1523,7 +1547,10 @@ function ensurePage(id: number) {
 }
 
 function localPage(r: PlayerRoute): string | null {
-  const e = entries().find((x) => x.state === "done" && x.key === keyOf(r));
+  let e = entries().find((x) => x.state === "done" && x.key === keyOf(r));
+  // Downloads without a title identity ride on the route's `dl` id.
+  if (!e && typeof r.dl === "number")
+    e = entries().find((x) => x.dlId === r.dl && x.state === "done");
   if (!e || (e.type === "anime" && (e.lang ?? "sub") !== (r.lang ?? "sub"))) return null;
   if (!NATIVE) return null;
   // iPhone: legacy native-asset HLS records play in AVKit instead.

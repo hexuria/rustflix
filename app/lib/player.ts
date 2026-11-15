@@ -5427,7 +5427,7 @@ function goTo(season: number | undefined, episode: number) {
   persist();
   // Episode hops replace the history entry: Back leaves the player
   // instead of walking through every episode watched.
-  navigate({ ...r, season, episode, next: undefined }, { replace: true });
+  navigate({ ...r, season, episode, next: undefined, dl: undefined }, { replace: true });
 }
 
 /** Plays episode `n` (of `season` for TV) of the current title,

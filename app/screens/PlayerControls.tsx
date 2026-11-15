@@ -190,6 +190,9 @@ export const playerDlTarget = computed<DlTarget | null>(() => {
     episodeName: ep?.name || undefined,
     poster: p.poster,
     still: ep?.still,
+    // A finished file with no media identity (route `dl`): lets the
+    // download control find its entry and show the done mark.
+    dlId: p.dl,
   };
 });
 

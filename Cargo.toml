@@ -28,10 +28,26 @@ serde = { version = "1", features = ["derive"] }
 # wakes it (both already in the tree).
 gpui_platform = { package = "gpui-fast-platform", version = "0.1.10", default-features = false }
 async-channel = "2"
-
 # `fs.space` (statvfs) for the download folder's volume.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The Linux player (src/player/linux): GStreamer decodes to BGRA frames,
+# painted by GPUI through the image atlas. `image`/`smallvec` are already
+# in the tree through gpui-fast.
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = "0.25.4"
+gstreamer-app = "0.25.2"
+gstreamer-video = "0.25.2"
+image = "0.25.10"
+smallvec = "1.16.5"
+# The web views NSH builds through wry are GtkWidgets in this process:
+# WebKitGTK's user content manager takes scripts that run in every frame
+# (the all-frames media sniffer), its cookie manager answers
+# `sys.webCookies`, and GTK's toplevel list finds the widgets. Both are
+# already in the tree through lb-wry.
+gtk = "0.18"
+webkit2gtk = { version = "2.0.1", features = ["v2_40"] }
 
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore
 # (all already in the tree through wry).
@@ -71,3 +87,14 @@ inherits = "release"
 debug = "line-tables-only"
 strip = "none"
 
+
+# Linux draws macOS-style traffic lights (left side) for its client-side
+# window decorations — a patch on top of the published 0.4.0 until it
+# lands upstream in longbridge/nsh (branch linux-traffic-lights).
+[patch.crates-io]
+nsh-platform-gpui = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
+nsh-engine = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
+nsh-bundler = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
+nsh-core = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
+nsh-js = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
+nsh-base = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }

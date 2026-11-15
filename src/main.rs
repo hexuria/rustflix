@@ -719,21 +719,25 @@ mod files {
         use std::path::Path;
 
         /// Freedesktop Trash through `gio trash` (the same Trash the file
-        /// manager uses); permanent deletion only when `gio` is missing.
+        /// manager uses). Permanent deletion only when there is no `gio`
+        /// to run: a `gio` that ran and failed (no Trash on that mount, no
+        /// permission) leaves the file where it is and reports failure.
         pub(super) fn trash(path: &Path) -> bool {
-            if std::process::Command::new("gio")
+            let ran = std::process::Command::new("gio")
                 .arg("trash")
                 .arg(path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-            {
-                return true;
-            }
-            match std::fs::symlink_metadata(path) {
-                Ok(m) if m.is_dir() => std::fs::remove_dir_all(path).is_ok(),
-                Ok(_) => std::fs::remove_file(path).is_ok(),
+                .status();
+            match ran {
+                Ok(status) => status.success(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::symlink_metadata(path) {
+                        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path).is_ok(),
+                        Ok(_) => std::fs::remove_file(path).is_ok(),
+                        Err(_) => false,
+                    }
+                }
                 Err(_) => false,
             }
         }

@@ -8,6 +8,7 @@
 //!
 //! Painting: gpui-fast's `surface`/`paint_surface` is macOS/iOS-only
 //! (CVPixelBuffer), so each decoded BGRA frame becomes a `RenderImage`
+//! (built by the player on its streaming thread, never copied here)
 //! uploaded to the sprite atlas once per video frame. The previous
 //! frame's image is dropped from the atlas in the same paint
 //! (`Window::drop_image`), so the atlas holds at most the frame on
@@ -16,7 +17,6 @@
 
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
-use image::{Frame, ImageBuffer, Rgba};
 use nsh_platform_gpui::{
     ComponentContext, NativeComponent,
     gpui::{
@@ -26,7 +26,6 @@ use nsh_platform_gpui::{
     },
 };
 use serde_json::{Value as JsonValue, json};
-use smallvec::SmallVec;
 
 use super::{
     Fit,
@@ -41,7 +40,7 @@ struct FrameRect {
     h: f32,
 }
 
-/// The newest decoded frame as a GPUI image (built once per frame seq).
+/// The frame on screen (the player's image for that frame seq).
 struct Shown {
     seq: u64,
     image: Arc<gpui::RenderImage>,
@@ -79,24 +78,15 @@ impl Video {
         }
     }
 
-    /// The current frame as a `RenderImage`, rebuilt only when the
-    /// player's seq moved. The replaced image retires to the atlas drop.
+    /// The player's newest frame. When its seq moved, the image it
+    /// replaces retires to the atlas drop.
     fn shown_image(&mut self) -> Option<Arc<gpui::RenderImage>> {
         let fd: Arc<FrameData> = self.player.frame()?;
-        if self.shown.as_ref().is_some_and(|s| s.seq == fd.seq) {
-            return self.shown.as_ref().map(|s| s.image.clone());
+        if self.shown.as_ref().is_none_or(|s| s.seq != fd.seq) {
+            let next = Shown { seq: fd.seq, image: fd.image.clone() };
+            self.retired = self.shown.replace(next).map(|s| s.image);
         }
-        // BGRA bytes in an Rgba-typed buffer: the atlas reads bytes, the
-        // pixel type is only the container (same trick as gpui's WebP
-        // path, which swaps RGBA→BGRA before Frame::new).
-        let buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            ImageBuffer::from_raw(fd.width, fd.height, fd.bgra.clone())?;
-        let image = Arc::new(gpui::RenderImage::new(SmallVec::from_elem(
-            Frame::new(buffer),
-            1,
-        )));
-        self.retired = self.shown.replace(Shown { seq: fd.seq, image: image.clone() }).map(|s| s.image);
-        Some(image)
+        Some(fd.image.clone())
     }
 }
 

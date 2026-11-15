@@ -1,24 +1,32 @@
 //! The Linux player core: a `playbin3` whose video and text outputs are
-//! `appsink`s. The video sink hands BGRA frames to the component through
-//! a shared slot (one `Arc` per frame, no copy after the row unpack);
-//! the text sink turns subtitle buffers into `cues` events. Audio goes
-//! to the default sink; playbin3's `volume`/`mute` cover those, and its
+//! `appsink`s. The video sink turns each BGRA frame into the image GPUI
+//! paints (one copy, made on the streaming thread) and shares it with
+//! the component through a slot; the text sink turns subtitle buffers
+//! into `cues` events. Audio goes to the default sink; playbin3's
+//! `volume`/`mute` cover those, and its
 //! `GstStreamCollection`/`GST_EVENT_SELECT_STREAMS` API covers the
 //! audio/subtitle tracks (playbin2 does not post stream collections).
 //!
 //! Threads: GStreamer calls the appsink callbacks on its streaming
 //! threads and posts bus messages on the pipeline's thread; both only
 //! take `Inner`'s mutex briefly and then `emit`/`redraw` (both are safe
-//! from any thread — `ComponentContext` is Send + Sync). A 4 Hz tick
-//! thread does the position/duration queries and the `progress`,
-//! `seeked` and end bookkeeping, so nothing here ever blocks the main
-//! thread and a paused pipeline produces no frames and no redraws
-//! (appsink's `sync` paces `new_sample` to the stream clock).
+//! from any thread — `ComponentContext` is Send + Sync).
+//!
+//! State changes, seeks and `select-streams` wait on those streaming
+//! threads, so none of them may run while `Inner`'s mutex is held (a
+//! callback blocked on it would never return), and none on the main
+//! thread. `Inner` only queues them as [`Job`]s; the player's worker
+//! thread runs them in order with the lock released. The same thread
+//! does the 4 Hz tick (the position/duration queries, `progress`, the
+//! `seeked` fallback and the end bookkeeping). A paused pipeline
+//! produces no frames and no redraws (appsink's `sync` paces
+//! `new_sample` to the stream clock).
 
 use std::{
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, RecvTimeoutError},
     },
     time::{Duration, Instant},
 };
@@ -26,7 +34,10 @@ use std::{
 use gstreamer::{prelude::*, SeekFlags, SeekType};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_video::{VideoFrame, VideoFrameExt, VideoInfo};
+use image::{Frame, ImageBuffer, Rgba};
+use nsh_platform_gpui::gpui::RenderImage;
 use serde_json::{Value, json};
+use smallvec::SmallVec;
 
 use super::{Fit, NowPlaying, size_of};
 
@@ -39,12 +50,13 @@ static SEQ: AtomicU64 = AtomicU64::new(1);
 pub(crate) type Emit = Arc<dyn Fn(&str, Value) + Send + Sync>;
 pub(crate) type Redraw = Arc<dyn Fn() + Send + Sync>;
 
-/// One decoded frame, BGRA tightly packed (what GPUI's atlas wants).
+/// One decoded frame as the image GPUI paints: BGRA, tightly packed
+/// (what its atlas wants), built once on the streaming thread.
 pub(crate) struct FrameData {
     pub(crate) seq: u64,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) bgra: Vec<u8>,
+    pub(crate) image: Arc<RenderImage>,
 }
 
 #[derive(Clone)]
@@ -83,6 +95,16 @@ struct Inner {
     pipeline: Option<gstreamer::Element>,
     /// Bumped for every new pipeline; a stale bus thread exits on it.
     bus_gen: u64,
+    /// The worker thread's queue (see [`Job`]).
+    jobs: mpsc::Sender<Job>,
+    /// From a new pipeline until `Job::Start` has read `start_at` and
+    /// `paused`: the pipeline is prerolling in PAUSED.
+    starting: bool,
+    /// This pipeline's first preroll was seen (`Job::Start` is queued).
+    prerolled: bool,
+    /// The `startAt` seek that is on its way, and when it went out:
+    /// until the position gets there, `progress` reports the target.
+    landing: Option<(f64, Instant)>,
 
     src: Option<String>,
     start_at: f64,
@@ -158,12 +180,7 @@ fn gst_init() {
 /// when there is no such player.
 pub(crate) fn control(handle: u64, data: &Value) -> bool {
     let Some(inner) = lookup(handle) else { return false };
-    // Pipeline calls that can wait on streaming threads run after the
-    // lock is released (the appsink callbacks take it).
-    let mut seek_job = None;
-    let mut sel_job = None;
-    {
-        let Ok(mut i) = inner.lock() else { return false };
+    let Ok(mut i) = inner.lock() else { return false };
     if let Some(v) = data.get("muted").and_then(Value::as_bool) {
         i.set_muted(v);
     }
@@ -200,44 +217,17 @@ pub(crate) fn control(handle: u64, data: &Value) -> bool {
         _ => {}
     }
     if let Some(t) = data.get("seek").and_then(Value::as_f64) {
-        seek_job = i.seek_prepare(t);
+        i.seek(t);
     }
     if let Some(id) = data.get("selectAudio").and_then(Value::as_str) {
-        let idx = id.strip_prefix('a').and_then(|s| s.parse::<usize>().ok());
-        i.sel_audio = idx.and_then(|n| i.audio.get(n)).and_then(|t| t.gst_id.clone());
-        sel_job = i.select_streams();
+        i.select(false, Some(id));
     }
     match data.get("selectSubtitle") {
-        Some(Value::String(id)) => {
-            let idx = id.strip_prefix('t').and_then(|s| s.parse::<usize>().ok());
-            i.sel_text = idx.and_then(|n| i.subs.get(n)).and_then(|t| t.gst_id.clone());
-            sel_job = i.select_streams();
-        }
-        Some(Value::Null) => {
-            i.sel_text = None;
-            sel_job = i.select_streams();
-        }
+        Some(Value::String(id)) => i.select(true, Some(id)),
+        Some(Value::Null) => i.select(true, None),
         _ => {}
     }
     // `pip`: no picture in picture on Linux — accept and ignore.
-    }
-    if let Some((pipe, target)) = seek_job
-        && pipe
-            .seek_simple(SeekFlags::FLUSH, gstreamer::ClockTime::from_seconds_f64(target))
-            .is_err()
-        && let Ok(mut i) = inner.lock()
-    {
-        i.pending_seek = None;
-        (i.emit)(
-            "error",
-            json!({ "message": "seek failed", "code": "seek", "fatal": false }),
-        );
-    }
-    if let Some((pipe, ids)) = sel_job {
-        pipe.send_event(gstreamer::event::SelectStreams::new(
-            ids.iter().map(String::as_str),
-        ));
-    }
     true
 }
 
@@ -250,6 +240,7 @@ impl Player {
     pub(crate) fn new(emit: Emit, redraw: Redraw) -> Player {
         gst_init();
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let (jobs, queue) = mpsc::channel();
         let inner = Arc::new(Mutex::new(Inner {
             id,
             emit,
@@ -257,6 +248,10 @@ impl Player {
             dead: false,
             pipeline: None,
             bus_gen: 0,
+            jobs,
+            starting: false,
+            prerolled: false,
+            landing: None,
             src: None,
             start_at: 0.0,
             paused: false,
@@ -293,18 +288,14 @@ impl Player {
         }));
         registry().lock().unwrap().insert(id, Arc::downgrade(&inner));
         LIVE.fetch_add(1, Ordering::Relaxed);
-        // The 4 Hz tick: progress, seeked fallback, end detection, the
-        // playing flag and the cue tail. One thread per player for its
-        // life; it exits when the player is dropped.
+        // The worker: the pipeline jobs and the 4 Hz tick (progress, the
+        // seeked fallback, end detection, the playing flag and the cue
+        // tail). One thread per player; it exits after the player is
+        // dropped and its pipeline is stopped.
         let weak = Arc::downgrade(&inner);
         std::thread::Builder::new()
             .name(format!("rustflix-player-{id}"))
-            .spawn(move || {
-                while let Some(inner) = weak.upgrade() {
-                    std::thread::sleep(Duration::from_millis(250));
-                    tick(&inner);
-                }
-            })
+            .spawn(move || worker(weak, queue))
             .ok();
         Player { id, inner }
     }
@@ -359,45 +350,14 @@ impl Player {
         self.with(|i| i.set_display_size(size));
     }
 
-    /// Seeks to `secs`; a `seeked` event follows. The GStreamer call runs
-    /// outside `Inner`'s lock: it can wait on streaming threads, and the
-    /// appsink callbacks take that same lock.
+    /// Seeks to `secs`; a `seeked` event follows.
     pub(crate) fn seek(&self, secs: f64) {
-        let job = self.with(|i| i.seek_prepare(secs));
-        let Some((pipe, target)) = job.flatten() else { return };
-        if pipe
-            .seek_simple(SeekFlags::FLUSH, gstreamer::ClockTime::from_seconds_f64(target))
-            .is_err()
-        {
-            self.with(|i| {
-                i.pending_seek = None;
-                (i.emit)(
-                    "error",
-                    json!({ "message": "seek failed", "code": "seek", "fatal": false }),
-                );
-            });
-        }
+        self.with(|i| i.seek(secs));
     }
 
-    /// `selectAudio` / `selectSubtitle` (`None`: subtitles off). Like
-    /// `seek`, the `select-streams` event goes out without the lock.
+    /// `selectAudio` / `selectSubtitle` (`None`: subtitles off).
     pub(crate) fn select(&self, legible: bool, id: Option<&str>) {
-        let job = self.with(|i| {
-            // "a3"/"t2" index the tracks `load`/`tracks` reported; the
-            // pipeline selects by the GstStream id behind them.
-            if !legible {
-                let idx = id.and_then(|s| s.strip_prefix('a')).and_then(|s| s.parse::<usize>().ok());
-                i.sel_audio = idx.and_then(|n| i.audio.get(n)).and_then(|t| t.gst_id.clone());
-            } else {
-                let idx = id.and_then(|s| s.strip_prefix('t')).and_then(|s| s.parse::<usize>().ok());
-                i.sel_text = idx.and_then(|n| i.subs.get(n)).and_then(|t| t.gst_id.clone());
-            }
-            i.select_streams()
-        });
-        let Some((pipe, ids)) = job.flatten() else { return };
-        pipe.send_event(gstreamer::event::SelectStreams::new(
-            ids.iter().map(String::as_str),
-        ));
+        self.with(|i| i.select(legible, id));
     }
 
     /// The newest frame for the component to paint.
@@ -421,7 +381,181 @@ impl Drop for Player {
     }
 }
 
-// --- The tick -----------------------------------------------------------------
+// --- The worker: pipeline jobs and the tick -------------------------------------
+
+/// A pipeline call that can wait on GStreamer's streaming threads; the
+/// module header says why these never run under `Inner`'s mutex.
+enum Job {
+    /// Bring a fresh pipeline to PAUSED; `Start` follows its preroll.
+    Preroll(gstreamer::Element),
+    /// The prerolled pipeline's first seek (`startAt`, the rate), then
+    /// PAUSED or PLAYING as `paused` says.
+    Start(gstreamer::Element),
+    /// PAUSED or PLAYING, whichever `paused` says when the job runs.
+    State(gstreamer::Element),
+    /// A seek the app asked for; `seeked` follows.
+    Seek(gstreamer::Element, f64),
+    /// The playback rate changed: a seek to where playback is now.
+    Rate(gstreamer::Element),
+    SelectStreams(gstreamer::Element, Vec<String>),
+    /// Stop and release a pipeline that was replaced or dropped.
+    Stop(gstreamer::Element),
+}
+
+const TICK: Duration = Duration::from_millis(250);
+/// How long `progress` waits for the position to reach `startAt`.
+const LANDING: Duration = Duration::from_secs(10);
+
+/// The player's own thread: the queued jobs in order, the tick between
+/// them. It ends once the player is gone and its last job (stopping the
+/// pipeline) has run.
+fn worker(weak: Weak<Mutex<Inner>>, queue: mpsc::Receiver<Job>) {
+    let mut next = Instant::now() + TICK;
+    loop {
+        match queue.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            Ok(job) => run(&weak, job),
+            Err(RecvTimeoutError::Timeout) => {
+                next = Instant::now() + TICK;
+                if let Some(inner) = weak.upgrade() {
+                    tick(&inner);
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Runs `f` on the player while `pipe` is still its pipeline; a job
+/// queued for a pipeline that was replaced has nothing left to do.
+fn current<R>(
+    weak: &Weak<Mutex<Inner>>,
+    pipe: &gstreamer::Element,
+    f: impl FnOnce(&mut Inner) -> R,
+) -> Option<R> {
+    let inner = weak.upgrade()?;
+    let mut i = inner.lock().ok()?;
+    let live = !i.dead && i.pipeline.as_ref() == Some(pipe);
+    let out = live.then(|| f(&mut i));
+    drop(i);
+    out
+}
+
+/// A flushing seek that keeps the playback rate.
+fn seek_to(pipe: &gstreamer::Element, rate: f64, secs: f64, flags: SeekFlags) -> bool {
+    let Ok(start) = gstreamer::ClockTime::try_from_seconds_f64(secs) else {
+        return false;
+    };
+    pipe.seek(
+        rate,
+        SeekFlags::FLUSH | flags,
+        SeekType::Set,
+        start,
+        SeekType::None,
+        gstreamer::ClockTime::NONE,
+    )
+    .is_ok()
+}
+
+fn play_state(paused: bool) -> gstreamer::State {
+    if paused { gstreamer::State::Paused } else { gstreamer::State::Playing }
+}
+
+fn run(weak: &Weak<Mutex<Inner>>, job: Job) {
+    use gstreamer::StateChangeSuccess;
+    match job {
+        Job::Preroll(pipe) => {
+            if current(weak, &pipe, |_| ()).is_none() {
+                return;
+            }
+            // ASYNC is the usual answer: the bus's ASYNC_DONE queues
+            // `Start`. A pipeline that is in PAUSED at once (a live source
+            // does not preroll) posts no such message.
+            let res = pipe.set_state(gstreamer::State::Paused);
+            log::debug!("player: preroll -> {res:?}");
+            if matches!(res, Ok(StateChangeSuccess::Success | StateChangeSuccess::NoPreroll)) {
+                current(weak, &pipe, Inner::prerolled_now);
+            }
+        }
+        Job::Start(pipe) => {
+            let Some((at, rate)) = current(weak, &pipe, |i| {
+                i.starting = false;
+                // `startAt` applies once, to this source (as in av.rs).
+                let at = std::mem::take(&mut i.start_at);
+                let at = (at.is_finite() && at > 0.0).then_some(at);
+                if let Some(at) = at {
+                    i.position = at;
+                    i.landing = Some((at, Instant::now()));
+                }
+                (at, f64::from(i.rate))
+            }) else {
+                return;
+            };
+            if (at.is_some() || (rate - 1.0).abs() > f64::EPSILON)
+                && !seek_to(&pipe, rate, at.unwrap_or(0.0), SeekFlags::empty())
+            {
+                log::warn!("player: start seek to {at:?} at rate {rate} refused");
+                current(weak, &pipe, |i| i.landing = None);
+            }
+            let Some(paused) = current(weak, &pipe, |i| i.paused) else { return };
+            let res = pipe.set_state(play_state(paused));
+            log::debug!("player: start at {at:?}, rate {rate}, paused {paused} -> {res:?}");
+        }
+        Job::State(pipe) => {
+            // While the pipeline starts, `Start` applies the state.
+            let Some(Some(paused)) =
+                current(weak, &pipe, |i| (!i.starting).then_some(i.paused))
+            else {
+                return;
+            };
+            let res = pipe.set_state(play_state(paused));
+            log::debug!("player: paused {paused} -> {res:?}");
+        }
+        Job::Seek(pipe, target) => {
+            let Some(rate) = current(weak, &pipe, |i| f64::from(i.rate)) else { return };
+            let ok = seek_to(&pipe, rate, target, SeekFlags::empty());
+            log::debug!("player: seek to {target} at rate {rate} -> {ok}");
+            if !ok {
+                current(weak, &pipe, |i| {
+                    i.pending_seek = None;
+                    (i.emit)(
+                        "error",
+                        json!({ "message": "seek failed", "code": "seek", "fatal": false }),
+                    );
+                });
+            }
+        }
+        Job::Rate(pipe) => {
+            // While the pipeline starts, `Start` applies the rate.
+            let Some(Some((rate, known))) = current(weak, &pipe, |i| {
+                (!i.starting).then_some((f64::from(i.rate), i.position))
+            }) else {
+                return;
+            };
+            let pos = pipe
+                .query_position::<gstreamer::ClockTime>()
+                .map(|t| t.seconds_f64())
+                .unwrap_or(known);
+            // Accurate, so the picture does not jump back to a keyframe;
+            // a demuxer may refuse that, and then the plain seek will do.
+            if !seek_to(&pipe, rate, pos, SeekFlags::ACCURATE)
+                && !seek_to(&pipe, rate, pos, SeekFlags::empty())
+            {
+                log::debug!("player: rate {rate} seek refused");
+            }
+        }
+        Job::SelectStreams(pipe, ids) => {
+            if current(weak, &pipe, |_| ()).is_some() {
+                pipe.send_event(gstreamer::event::SelectStreams::new(
+                    ids.iter().map(String::as_str),
+                ));
+            }
+        }
+        Job::Stop(pipe) => {
+            let res = pipe.set_state(gstreamer::State::Null);
+            log::debug!("player: stop -> {res:?}");
+        }
+    }
+}
 
 fn tick(inner: &Arc<Mutex<Inner>>) {
     let Ok(mut i) = inner.lock() else { return };
@@ -430,7 +564,7 @@ fn tick(inner: &Arc<Mutex<Inner>>) {
     }
     let Some(pipe) = i.pipeline.clone() else { return };
 
-    let pos = pipe.query_position::<gstreamer::ClockTime>().map(|t| t.seconds_f64());
+    let queried = pipe.query_position::<gstreamer::ClockTime>().map(|t| t.seconds_f64());
     let dur = pipe
         .query_duration::<gstreamer::ClockTime>()
         .map(|t| t.seconds_f64())
@@ -438,23 +572,33 @@ fn tick(inner: &Arc<Mutex<Inner>>) {
     if let Some(d) = dur {
         i.duration = Some(d);
     }
+    // Until playback is at `startAt` the pipeline still answers with
+    // where it prerolled (0). Report the target instead, so nothing takes
+    // 0 for the place the viewer got to.
+    if i.landing.is_some_and(|(at, since)| {
+        queried.is_some_and(|p| p >= at - 1.0) || since.elapsed() > LANDING
+    }) {
+        i.landing = None;
+    }
+    let pos = if i.starting {
+        Some(i.start_at.max(0.0))
+    } else if let Some((at, _)) = i.landing {
+        Some(at)
+    } else {
+        queried
+    };
     if let Some(p) = pos {
         i.position = p;
     }
 
     // PLAYING count: pipeline in PLAYING and not paused by us.
-    let playing = !i.paused && !i.ended && pos.is_some();
-    if playing != i.playing {
-        i.playing = playing;
-        if playing {
-            PLAYING.fetch_add(1, Ordering::Relaxed);
-        } else {
-            PLAYING.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
+    let playing = !i.paused && !i.ended && !i.starting && queried.is_some();
+    i.set_playing_state(playing);
 
     // A seek that got no ASYNC_DONE still completes: the position lands.
-    if let Some((target, at)) = i.pending_seek {
+    if !i.starting
+        && let Some((target, at)) = i.pending_seek
+    {
         let close = pos.is_some_and(|p| (p - target).abs() < 0.5);
         if close || at.elapsed() > Duration::from_secs(5) {
             i.pending_seek = None;
@@ -469,8 +613,9 @@ fn tick(inner: &Arc<Mutex<Inner>>) {
     }
 
     // End: EOS is the bus's word; position at the duration is the backup
-    // for streams whose duration was unknown until late.
-    if !i.ended && dur.is_some_and(|d| i.position >= d - 0.05) {
+    // for streams whose duration was unknown until late. Whichever comes
+    // first sets `ended`, and the other then stays quiet.
+    if !i.ended && !i.starting && dur.is_some_and(|d| i.position >= d - 0.05) {
         i.ended = true;
         i.set_playing_state(false);
         (i.emit)("end", json!({}));
@@ -551,12 +696,21 @@ impl Inner {
         }
     }
 
-    /// Stops and releases the pipeline (any thread).
+    fn queue(&self, job: Job) {
+        // The worker outlives `Inner`, so this only fails if its thread
+        // could not be spawned.
+        let _ = self.jobs.send(job);
+    }
+
+    /// Forgets the pipeline and queues its stop (any thread).
     fn teardown(&mut self) {
         self.bus_gen += 1;
         if let Some(pipe) = self.pipeline.take() {
-            let _ = pipe.set_state(gstreamer::State::Null);
+            self.queue(Job::Stop(pipe));
         }
+        self.starting = false;
+        self.prerolled = false;
+        self.landing = None;
         self.latest = None;
         self.no_video = false;
         self.audio.clear();
@@ -578,19 +732,27 @@ impl Inner {
         self.set_playing_state(false);
     }
 
-    /// Applies the current props to a fresh pipeline (call after build).
+    /// Applies the current props to a fresh pipeline (call after build)
+    /// and starts it: PAUSED first, so `startAt` and the rate go out
+    /// before anything plays (`Job::Start`).
     fn apply_state(&mut self) {
-        let Some(pipe) = &self.pipeline else { return };
+        let Some(pipe) = self.pipeline.clone() else { return };
         // Volume 0..1 → playbin's 0..10; mute is its own flag.
         pipe.set_property("volume", f64::from(self.volume));
         pipe.set_property("mute", self.muted);
-        if self.paused {
-            let _ = pipe.set_state(gstreamer::State::Paused);
-        } else {
-            let _ = pipe.set_state(gstreamer::State::Playing);
+        self.starting = true;
+        self.prerolled = false;
+        self.queue(Job::Preroll(pipe));
+    }
+
+    /// The pipeline finished its first preroll: `Start` is next.
+    fn prerolled_now(&mut self) {
+        if !self.starting || self.prerolled {
+            return;
         }
-        if (self.rate - 1.0).abs() > f32::EPSILON {
-            self.set_rate(self.rate);
+        self.prerolled = true;
+        if let Some(pipe) = self.pipeline.clone() {
+            self.queue(Job::Start(pipe));
         }
     }
 
@@ -599,6 +761,7 @@ impl Inner {
         if url == self.src.as_deref() {
             return;
         }
+        log::debug!("player {}: src {url:?} (startAt {})", self.id, self.start_at);
         self.teardown();
         self.src = url.map(str::to_owned);
         self.started = Instant::now();
@@ -646,11 +809,29 @@ impl Inner {
         if let Some(bin) = pipeline.downcast_ref::<gstreamer::Bin>() {
             bin.connect("deep-element-added", false, |values| {
                 // (bin, sub_bin, element)
-                if let Some(v) = values.get(2)
-                    && let Ok(el) = v.get::<gstreamer::Element>()
-                    && el.factory().is_some_and(|f| f.name() == "souphttpsrc")
-                {
+                let Some(el) = values.get(2).and_then(|v| v.get::<gstreamer::Element>().ok())
+                else {
+                    return None;
+                };
+                let factory = el.factory().map(|f| f.name().to_string()).unwrap_or_default();
+                if factory == "souphttpsrc" {
                     el.set_property("proxy", "");
+                }
+                // No quality switches by measured bandwidth: one variant, the
+                // best, for the whole play. hlsdemux2 (seen in GStreamer
+                // 1.28.2) never returns from a seek that arrives while a
+                // switch is under way: gst_hls_demux_seek waits for the new
+                // variant's playlist in a loop that cannot make progress once
+                // the seek has stopped the stream
+                // (gst_hls_demux_wait_for_variant_playlist), and the calling
+                // thread spins there for good. A download of the same title
+                // made such switches frequent, and a seek right after start
+                // (`startAt`) met one often. With a connection bitrate set,
+                // the demuxer picks by it at start and never switches.
+                if matches!(factory.as_str(), "hlsdemux2" | "dashdemux2")
+                    && el.find_property("connection-bitrate").is_some()
+                {
+                    el.set_property("connection-bitrate", u32::MAX);
                 }
                 None
             });
@@ -686,8 +867,8 @@ impl Inner {
             return;
         }
         self.paused = paused;
-        if let Some(pipe) = &self.pipeline {
-            let _ = pipe.set_state(if paused { gstreamer::State::Paused } else { gstreamer::State::Playing });
+        if let Some(pipe) = self.pipeline.clone() {
+            self.queue(Job::State(pipe));
         }
         (self.emit)("rate", json!({ "rate": if paused { 0.0 } else { self.rate as f64 }, "paused": paused }));
     }
@@ -707,25 +888,13 @@ impl Inner {
     }
 
     fn set_rate(&mut self, rate: f32) {
-        self.rate = rate.max(0.25);
-        let Some(pipe) = &self.pipeline else { return };
-        if (self.rate - 1.0).abs() < f32::EPSILON {
-            // Back to normal speed is still a seek with rate 1.
+        let rate = rate.max(0.25);
+        if (rate - self.rate).abs() < f32::EPSILON {
+            return;
         }
-        let pos = self.position;
-        let r = f64::from(self.rate);
-        if pipe
-            .seek(
-                r,
-                SeekFlags::empty(),
-                SeekType::Set,
-                gstreamer::ClockTime::from_seconds_f64(pos),
-                SeekType::None,
-                gstreamer::ClockTime::NONE,
-            )
-            .is_err()
-        {
-            log::debug!("player {}: rate {r} seek refused", self.id);
+        self.rate = rate;
+        if let Some(pipe) = self.pipeline.clone() {
+            self.queue(Job::Rate(pipe));
         }
     }
 
@@ -741,22 +910,42 @@ impl Inner {
         self.display_res = size;
     }
 
-    /// Marks a seek pending and returns the pipeline + target for the
-    /// caller to seek outside the lock.
-    fn seek_prepare(&mut self, secs: f64) -> Option<(gstreamer::Element, f64)> {
-        let pipe = self.pipeline.clone()?;
-        let target = secs.max(0.0);
+    /// Seeks to `secs`; a `seeked` event follows. While the pipeline is
+    /// still starting, the target becomes its start position instead.
+    fn seek(&mut self, secs: f64) {
+        let Some(pipe) = self.pipeline.clone() else { return };
+        let target = if secs.is_finite() { secs.max(0.0) } else { 0.0 };
         self.pending_seek = Some((target, Instant::now()));
         self.ended = false;
-        Some((pipe, target))
+        self.landing = None;
+        if self.starting {
+            self.start_at = target;
+        } else {
+            self.queue(Job::Seek(pipe, target));
+        }
     }
 
-    /// `GST_EVENT_SELECT_STREAMS` inputs for playbin3, computed under the
-    /// lock but sent by the caller without it: the streams to keep are
-    /// everything not audio/text, the chosen audio (default: the first
-    /// reported) and the chosen subtitle (none when subtitles are off).
-    fn select_streams(&self) -> Option<(gstreamer::Element, Vec<String>)> {
-        let pipe = self.pipeline.clone()?;
+    /// `selectAudio` / `selectSubtitle` (`None`: subtitles off).
+    /// "a3"/"t2" index the tracks `load`/`tracks` reported; the pipeline
+    /// selects by the GstStream id behind them.
+    fn select(&mut self, legible: bool, id: Option<&str>) {
+        let index = |prefix: char| {
+            id.and_then(|s| s.strip_prefix(prefix)).and_then(|s| s.parse::<usize>().ok())
+        };
+        if legible {
+            self.sel_text = index('t').and_then(|n| self.subs.get(n)).and_then(|t| t.gst_id.clone());
+        } else {
+            self.sel_audio = index('a').and_then(|n| self.audio.get(n)).and_then(|t| t.gst_id.clone());
+        }
+        self.select_streams();
+    }
+
+    /// Queues `GST_EVENT_SELECT_STREAMS` for playbin3: the streams to
+    /// keep are everything not audio/text, the chosen audio (default: the
+    /// first reported) and the chosen subtitle (none when subtitles are
+    /// off).
+    fn select_streams(&mut self) {
+        let Some(pipe) = self.pipeline.clone() else { return };
         let mut ids: Vec<String> = self.other_ids.clone();
         if let Some(a) = self
             .sel_audio
@@ -768,7 +957,9 @@ impl Inner {
         if let Some(t) = &self.sel_text {
             ids.push(t.clone());
         }
-        (!ids.is_empty()).then_some((pipe, ids))
+        if !ids.is_empty() {
+            self.queue(Job::SelectStreams(pipe, ids));
+        }
     }
 
     fn set_now_playing(&mut self, info: Option<NowPlaying>) {
@@ -823,57 +1014,54 @@ fn video_frame_callback(
     redraw: Redraw,
 ) -> impl FnMut(&AppSink) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> + Send + 'static {
     let mut framed = false;
-    let mut info: Option<VideoInfo> = None;
     move |sink| {
         let Ok(sample) = sink.pull_sample() else {
             return Ok(gstreamer::FlowSuccess::Ok);
         };
-        let caps = match sample.caps() {
-            Some(c) => c,
-            None => return Ok(gstreamer::FlowSuccess::Ok),
+        // The picture's size changes mid-stream when HLS switches quality,
+        // so the layout comes from this sample's caps, never an earlier one's.
+        let Some(vinfo) = sample.caps().and_then(|c| VideoInfo::from_caps(c).ok()) else {
+            return Ok(gstreamer::FlowSuccess::Ok);
         };
-        if info.is_none() {
-            match VideoInfo::from_caps(caps) {
-                Ok(v) => info = Some(v),
-                Err(_) => return Ok(gstreamer::FlowSuccess::Ok),
-            }
-        }
-        let Some(vinfo) = &info else { return Ok(gstreamer::FlowSuccess::Ok) };
         let Some(buffer) = sample.buffer_owned() else {
             return Ok(gstreamer::FlowSuccess::Ok);
         };
-        let Ok(frame) = VideoFrame::from_buffer_readable(buffer, vinfo) else {
+        let Ok(frame) = VideoFrame::from_buffer_readable(buffer, &vinfo) else {
             return Ok(gstreamer::FlowSuccess::Ok);
         };
         let (w, h) = (vinfo.width(), vinfo.height());
+        let rows = h as usize;
         let stride = frame.plane_stride().first().copied().unwrap_or(0).max(0) as usize;
         let row = w as usize * 4;
         let Ok(data) = frame.plane_data(0) else {
             return Ok(gstreamer::FlowSuccess::Ok);
         };
-        if stride < row || data.len() < stride * h as usize {
+        if row == 0 || rows == 0 || stride < row || data.len() < stride * (rows - 1) + row {
             return Ok(gstreamer::FlowSuccess::Ok);
         }
-        let mut bgra = vec![0u8; row * h as usize];
-        if stride == row {
-            let n = bgra.len();
-            bgra.copy_from_slice(&data[..n]);
-        } else {
-            for y in 0..h as usize {
-                let (s, d) = (y * stride, y * row);
-                bgra[d..d + row].copy_from_slice(&data[s..s + row]);
+        // The one copy of the frame: each row without its stride padding,
+        // into the buffer GPUI's image will own. The alpha byte is padding
+        // in video/x-raw BGRA and decoders leave it undefined; GPUI blends
+        // by it, so the same pass forces it opaque.
+        const OPAQUE: u32 = u32::from_ne_bytes([0, 0, 0, 255]);
+        let mut bgra = vec![0u8; row * rows];
+        for (dst, src) in bgra.chunks_exact_mut(row).zip(data.chunks(stride)) {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src[..row].chunks_exact(4)) {
+                let px = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]) | OPAQUE;
+                d.copy_from_slice(&px.to_ne_bytes());
             }
         }
-        // The alpha byte is padding in video/x-raw BGRA and decoders
-        // leave it undefined; GPUI blends by it, so force opaque.
-        for px in bgra.chunks_exact_mut(4) {
-            px[3] = 255;
-        }
+        // BGRA bytes in an Rgba-typed buffer: the atlas reads bytes, the
+        // pixel type is only the container (same trick as gpui's WebP
+        // path, which swaps RGBA→BGRA before Frame::new).
+        let Some(pixels) = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(w, h, bgra) else {
+            return Ok(gstreamer::FlowSuccess::Ok);
+        };
         let fd = Arc::new(FrameData {
             seq: SEQ.fetch_add(1, Ordering::Relaxed),
             width: w,
             height: h,
-            bgra,
+            image: Arc::new(RenderImage::new(SmallVec::from_elem(Frame::new(pixels), 1))),
         });
         let Some(inner) = weak.upgrade() else {
             return Ok(gstreamer::FlowSuccess::Ok);
@@ -952,23 +1140,32 @@ fn text_frame_callback(
 
 fn bus_loop(weak: Weak<Mutex<Inner>>, gen_: u64, bus: gstreamer::Bus) {
     loop {
-        let Some(msg) = bus.timed_pop(Some(gstreamer::ClockTime::from_mseconds(500))) else {
-            continue;
-        };
+        // The wait is bounded so a replaced pipeline's (or a dropped
+        // player's) thread ends even when no further message comes.
+        let msg = bus.timed_pop(Some(gstreamer::ClockTime::from_mseconds(500)));
         let Some(inner) = weak.upgrade() else { return };
         let Ok(mut i) = inner.lock() else { return };
         if i.dead || i.bus_gen != gen_ {
             return;
         }
-        handle_message(&mut i, msg);
+        if let Some(msg) = msg {
+            handle_message(&mut i, msg);
+        }
     }
 }
 
 fn handle_message(i: &mut Inner, msg: gstreamer::Message) {
     match msg.view() {
+        gstreamer::MessageView::StateChanged(s)
+            if log::log_enabled!(log::Level::Debug)
+                && msg.src() == i.pipeline.as_ref().map(|p| p.upcast_ref::<gstreamer::Object>()) =>
+        {
+            log::debug!("player {}: {:?} -> {:?} (pending {:?})", i.id, s.old(), s.current(), s.pending());
+        }
         gstreamer::MessageView::Error(e) => {
             let err = e.error();
             let debug = e.debug().unwrap_or_default();
+            log::debug!("player {}: error {err} {debug}", i.id);
             i.failed = true;
             i.set_playing_state(false);
             (i.emit)(
@@ -981,13 +1178,19 @@ fn handle_message(i: &mut Inner, msg: gstreamer::Message) {
             );
         }
         gstreamer::MessageView::Eos(_) => {
-            i.ended = true;
-            i.set_playing_state(false);
-            (i.emit)("end", json!({}));
+            log::debug!("player {}: eos (ended {})", i.id, i.ended);
+            // The tick may have seen the position reach the duration first.
+            if !i.ended {
+                i.ended = true;
+                i.set_playing_state(false);
+                (i.emit)("end", json!({}));
+            }
         }
         gstreamer::MessageView::AsyncDone(_) => {
-            if i.pending_seek.is_some() {
-                let (target, at) = i.pending_seek.take().unwrap();
+            if i.starting {
+                // The first preroll, not a seek's.
+                i.prerolled_now();
+            } else if let Some((target, at)) = i.pending_seek.take() {
                 let ms = at.elapsed().as_millis() as u64;
                 i.last_seeked_ms = Some(ms);
                 let time = i
@@ -1020,6 +1223,7 @@ fn handle_message(i: &mut Inner, msg: gstreamer::Message) {
             i.buffering_pct = Some(pct);
             let stalled = pct < 100;
             if stalled != i.stalled {
+                log::debug!("player {}: buffering {pct}%", i.id);
                 i.stalled = stalled;
                 (i.emit)(
                     "buffer",

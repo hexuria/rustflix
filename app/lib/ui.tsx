@@ -1580,7 +1580,7 @@ export function DownloadButton(props: {
   );
   const entry = computed(() => {
     const t = target();
-    return t ? downloadFor(t.type, t.id, t.season, t.episode) : null;
+    return t ? liveEntry(t) : null;
   });
   const s = props.size ?? 24;
   const hit = props.compact ? 28 : desktop ? s + 12 : Math.max(44, s + 12);
@@ -1674,7 +1674,7 @@ export function DownloadAction(props: {
 }) {
   const entry = computed(() => {
     const t = props.target();
-    return t ? downloadFor(t.type, t.id, t.season, t.episode) : null;
+    return t ? liveEntry(t) : null;
   });
   const label = computed(() => {
     const e = entry();

@@ -69,6 +69,10 @@ export type DlTarget = {
   episodeName?: string;
   poster?: string;
   still?: string;
+  /** Set when the target *is* a finished download with no media identity
+   * (`native:`/`legacy:` keys): lets lookups find it by id. Never an
+   * identity for a new entry — `cleanTarget` drops it. */
+  dlId?: number;
 };
 export type DlEntry = DlTarget & {
   dlId: number;

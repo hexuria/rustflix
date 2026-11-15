@@ -28,10 +28,19 @@ serde = { version = "1", features = ["derive"] }
 # wakes it (both already in the tree).
 gpui_platform = { package = "gpui-fast-platform", version = "0.1.10", default-features = false }
 async-channel = "2"
-
 # `fs.space` (statvfs) for the download folder's volume.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The Linux player (src/player/linux): GStreamer decodes to BGRA frames,
+# painted by GPUI through the image atlas. `image`/`smallvec` are already
+# in the tree through gpui-fast.
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = "0.25.4"
+gstreamer-app = "0.25.2"
+gstreamer-video = "0.25.2"
+image = "0.25.10"
+smallvec = "1.16.5"
 
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore
 # (all already in the tree through wry).

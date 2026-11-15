@@ -170,7 +170,7 @@ but the design work below is source-verified.
 | Media Foundation (classic `IMFSourceResolver`/Source Reader) | **No** — desktop MF does not resolve `.m3u8`; HLS needs WinRT `AdaptiveMediaSource` or a self-registered byte-stream handler | n/a | none | rejected for HLS |
 | WinRT `MediaPlayer` + `AdaptiveMediaSource` (frame-server mode) | Yes (HLS+DASH) | Partial: `IsVideoFrameServerEnabled` + `VideoFrameAvailable` + `CopyFrameToVideoSurface(IDirect3DSurface)` gives frames, but the API surface lacks volume/mute/rate and per-track selection parity, and subtitle cue access is unclear | none (OS) | fallback only |
 | GStreamer (playbin + appsink, like Linux / nsh 0.5.1 `video` feature) | Yes (hlsdemux) | Good: tracks, volume, rate, text streams | heavy: runtime + plugin set ~50–150 MB, LGPL | viable, heavier than mpv |
-| **libmpv (mpv render API, SW)** | Yes (ffmpeg hls demuxer) | **Best**: `track-list` (audio/subtitle ids, lang, title, selected), `volume`/`mute`/`speed`, `pause`, `time-pos`/`duration`, `paused-for-cache`/`seeking` (buffer), `end-file`, `sub-text`/`track-list` (cues approx.), `http-header-fields` for proxied URLs | bundled DLLs (~40–60 MB, mpv-2.dll + ffmpeg) inside the zip — no separate install; GPL-compatible with GPL-3.0 | **recommended** |
+| **libmpv (mpv render API, SW)** | Yes (ffmpeg hls demuxer) | **Best**: `track-list` (audio/subtitle ids, lang, title, selected), `volume`/`mute`/`speed`, `pause`, `time-pos`/`duration`, `paused-for-cache`/`seeking` (buffer), `end-file`, `sub-text`/`track-list` (cues approx.), `http-header-fields` for proxied URLs | bundled DLLs (~122 MB: libmpv-2.dll 121 MB + vulkan-1.dll ~1 MB) inside the zip — no separate install; GPL-compatible with GPL-3.0 | **recommended** |
 | FFmpeg alone | Yes | Would still need an audio output + sync layer | similar DLL weight | rejected (mpv already solves it) |
 
 libmpv specifics (verified against `include/mpv/render.h`):
@@ -208,6 +208,35 @@ libmpv specifics (verified against `include/mpv/render.h`):
 - `sys.nativeVideoInfo`: `available: true` only for what works — PiP
   `false` on Windows; tracks/fit/startAt/maxResolution per mpv.
 
+### libmpv smoke test — PASSED (2025-11-15)
+
+`examples/mpv-smoke.rs` (Windows-only, no GPUI) loads `libmpv-2.dll`
+via `LoadLibrary`+`GetProcAddress`, plays the public HLS test stream
+through the SW render API, and dumps the last frame to a BMP. Verified
+on this machine:
+
+- `vo=libmpv` is **required** — since mpv 0.38 the render-API VO is no
+  longer auto-selected; without it mpv initializes `vo=gpu-next`,
+  probes Vulkan (`VK_ERROR_INCOMPATIBLE_DRIVER`) then ANGLE
+  (`Failed to load LIBEGL.DLL`) and **segfaults** on this GPU-less VM.
+- With `vo=libmpv`: HLS master playlist demuxes, `duration=634.6s`,
+  `track-list`/`time-pos`/`paused-for-cache`/`FILE_LOADED`/
+  `PLAYBACK_RESTART`/`END_FILE` events all arrive; **1775 SW frames in
+  30 s (~59 fps) at 1280×720** on 2 vCPUs; last-frame BMP contains real
+  image data (verified pixel values, not black).
+- Audio: this SSH session has no audio endpoint, so default AO init
+  fails with `AO_INIT_FAILED` and aborts playback — `ao=null` was used
+  for the smoke run. On the interactive desktop WASAPI should work;
+  must be re-verified through `gui.ps1` before claiming audio works.
+- Runtime deps of `libmpv-2.dll` (mpv-dev 0.42 win64): all system DLLs
+  **except `vulkan-1.dll`**, which is absent on this VM (error 126 on
+  `LoadLibrary`). Borrowed a copy from EdgeCore for the test — the
+  shipped zip must include `vulkan-1.dll` next to `libmpv-2.dll` (or
+  next to the exe). The DLL is ~121 MB (ffmpeg statically linked) —
+  one file, no plugin set.
+- SW_FORMAT `"0bgr"` confirmed working; X byte still needs the alpha
+  fill described below.
+
 ### Open questions for implementation
 
 - ~~Alpha byte~~ — resolved: the sprite shader uses texture alpha; fill
@@ -216,8 +245,9 @@ libmpv specifics (verified against `include/mpv/render.h`):
   options are emitting `cues` on text change (check what
   `app/lib/nativevideo.tsx` actually consumes) or fetching the sidecar
   subtitle file ourselves. Decide at impl time against the TSX contract.
-- mpv distribution: mpv-dev zip from mpv-player releases (build.rs or
-  CI download) vs vcpkg `libmpv` — pick smallest-friction at impl time;
-  record here.
+- ~~mpv distribution~~ — resolved: ship `libmpv-2.dll` + `vulkan-1.dll`
+  from the mpv-player-windows `mpv-dev` archive (x86_64), fetched by
+  CI at package time; `LoadLibrary` at runtime so the exe has no
+  link-time dependency. Record exact URL/checksums when wiring M8.
 - Real-source codec coverage (HEVC/AV1/AC3) is whatever ffmpeg-in-mpv
   ships — fine for the test streams; real sites untested (Cloudflare).

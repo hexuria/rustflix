@@ -121,8 +121,10 @@ line, same `RefCell already borrowed`. Run:
 
 ## Milestone 3 — native player (`rustflix.video` on Windows)
 
-Status: **evaluated, not implemented.** Blocked on M1 for verification,
-but the design work below is source-verified.
+Status: **implemented, compiles, NOT runtime-verified** (M1 crash still
+blocks the app before its first frame). `cargo check` is clean apart
+from dead-code warnings. Decoder proven separately by
+`examples/mpv-smoke.rs` (see below).
 
 ### How frames reach the screen (what GPUI 0.1.10 offers on Windows)
 
@@ -207,6 +209,50 @@ libmpv specifics (verified against `include/mpv/render.h`):
   like `player.frame()?` today.
 - `sys.nativeVideoInfo`: `available: true` only for what works — PiP
   `false` on Windows; tracks/fit/startAt/maxResolution per mpv.
+
+### Implemented (`src/player/win/`, commit c39fe5e)
+
+- `mod.rs`: libmpv FFI (`LoadLibrary`/`GetProcAddress`, no link-time
+  dep), `Mpv` wrapper, engine thread owning `mpv_handle` + SW render
+  context, `Cmd` channel, `Player`/`PlayerInner` (global `PLAYERS`
+  registry so `sys.nativeVideo` works off the main thread), `control`,
+  `LIVE`/`PLAYING`, `size_of`, `Fit`.
+- `component.rs`: NSH component mirroring the macOS one; paints via
+  `gpui::canvas` + `Window::paint_image` (BGRA `RenderImage`), drops the
+  previous atlas tile with `Window::drop_image`.
+- Events emitted: `ready`, `load`, `frame`, `tracks`, `progress` (4 Hz),
+  `buffer`, `seeked`, `rate`, `end`, `error`, `cues` (mpv `sub-text`).
+- mpv options: `config=no`, `terminal=no`, `idle=yes`, `vo=libmpv`
+  (required), `cache=yes cache-secs=20`, `msg-level=all=warn`.
+- Observed properties: `time-pos`, `duration`, `track-list`,
+  `paused-for-cache`, `pause`, `speed`, `video-params/w|h|aspect`,
+  `demuxer-cache-duration`, `sub-text`, `seeking`.
+- Render size = video size scaled to fit `min(maxResolution,
+  on-screen frame × scale, 1080p default)`; `ObjectFit` (contain/cover)
+  is applied by GPUI at paint time.
+- `sys.nativeVideoInfo`: `available: true` on Windows; `pip: false`,
+  `nowPlaying: false`; `local`, `embeddedSubtitles`, `subtitleCues`
+  true (mpv `sub-text` → `cues`).
+
+### Known gaps / unverified in the implementation
+
+- **Runtime-unverified end to end** — the M1 crash kills the app before
+  any component renders. Compile-clean only.
+- `progress.buffered` is approximated (`time-pos + demuxer-cache-
+  duration`), not exact buffered ranges.
+- `cues` emits the current `sub-text` on change; cue in/out timing is
+  not provided (same limitation noted for macOS evaluation).
+- `window_scale_hint()` in `control()` returns 1.0 — the host-call
+  `frame` path can't see the window's scale factor, so the decode cap
+  may be off by the DPI scale (component prop path passes real pixels).
+- `rate` events report mpv's `speed`; `paused` comes from the `pause`
+  property — verify shapes against `app/lib/nativevideo.tsx` at runtime.
+- Track `id`s are emitted as strings of mpv's numeric ids; `selectAudio`/
+  `selectSubtitle` pass them back to `aid`/`sid`. `null` subtitle → `sid=no`.
+- Audio on this VM: SSH session has no audio endpoint (`AO_INIT_FAILED`
+  in the smoke test); WASAPI on the interactive desktop unverified.
+- `libmpv-2.dll` + `vulkan-1.dll` must ship beside the exe (or in `lib/mpv/`).
+- Dead-code warnings remain (`prop_string`, `frame_size`, `MpvEventSeek`).
 
 ### libmpv smoke test — PASSED (2025-11-15)
 

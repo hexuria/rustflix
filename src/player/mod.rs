@@ -44,8 +44,13 @@ pub(crate) fn register_host(host: &HostChannel) {
     // native player on in "auto". `local`: finished downloads play from the
     // downloader's 127.0.0.1 server (`…/<token>/<id>/<file>`, Range + HLS).
     host.handle("sys.nativeVideoInfo", |call| {
+        #[cfg(target_os = "macos")]
+        let available = true;
+        #[cfg(target_os = "windows")]
+        let available = win::dll_available();
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let available = false;
         let info = |pip: bool| {
-            let available = cfg!(any(target_os = "macos", target_os = "windows"));
             serde_json::json!({
                 "ok": true, "available": available, "version": 1,
                 "pip": pip, "fullscreen": false, "local": available, "nowPlaying": cfg!(target_os = "macos"),

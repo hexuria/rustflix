@@ -51,8 +51,17 @@ struct Lib(HModule);
 
 impl Lib {
     fn load() -> Option<Lib> {
-        // Next to the exe first, then the working directory.
-        for path in ["libmpv-2.dll", r"lib\mpv\libmpv-2.dll"] {
+        let mut candidates: Vec<String> = vec!["libmpv-2.dll".into(), r"lib\mpv\libmpv-2.dll".into()];
+        // Beside the exe (the packaged layout) too — LoadLibrary's bare-name
+        // search already covers the exe dir, but an absolute path is explicit.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                for rel in ["libmpv-2.dll", r"lib\mpv\libmpv-2.dll"] {
+                    candidates.push(dir.join(rel).to_string_lossy().into_owned());
+                }
+            }
+        }
+        for path in &candidates {
             let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
             let m = unsafe { LoadLibraryW(wide.as_ptr()) };
             if !m.is_null() {
@@ -117,11 +126,6 @@ struct MpvEventEndFile {
     playlist_entry: c_int,
 }
 
-#[repr(C)]
-struct MpvEventSeek {
-    position: f64,
-}
-
 struct Fns {
     create: unsafe extern "C" fn() -> *mut c_void,
     initialize: unsafe extern "C" fn(*mut c_void) -> c_int,
@@ -130,8 +134,6 @@ struct Fns {
     set_property_string: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int,
     command: unsafe extern "C" fn(*mut c_void, *const *const c_char) -> c_int,
     wait_event: unsafe extern "C" fn(*mut c_void, f64) -> *mut MpvEvent,
-    free: unsafe extern "C" fn(*mut c_void),
-    get_property_string: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
     observe_property: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
     request_log_messages: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
     render_create: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut MpvRenderParam) -> c_int,
@@ -177,8 +179,6 @@ impl Mpv {
             set_property_string: sym!("mpv_set_property_string"),
             command: sym!("mpv_command"),
             wait_event: sym!("mpv_wait_event"),
-            free: sym!("mpv_free"),
-            get_property_string: sym!("mpv_get_property_string"),
             observe_property: sym!("mpv_observe_property"),
             request_log_messages: sym!("mpv_request_log_messages"),
             render_create: sym!("mpv_render_context_create"),
@@ -227,16 +227,6 @@ impl Mpv {
         unsafe { (self.fns.observe_property)(self.ctx, uid, cs(name).as_ptr(), MPV_FORMAT_NODE) };
     }
 
-    fn prop_string(&self, name: &str) -> Option<String> {
-        let p = unsafe { (self.fns.get_property_string)(self.ctx, cs(name).as_ptr()) };
-        if p.is_null() {
-            return None;
-        }
-        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
-        unsafe { (self.fns.free)(p as *mut c_void) };
-        Some(s)
-    }
-
     fn render_create(&self) -> Result<*mut c_void, String> {
         let api = cs("sw");
         let params = [
@@ -257,11 +247,11 @@ impl Mpv {
         }
         let fmt = cs("0bgr");
         let size = [w as c_int, h as c_int];
-        let stride = w * 4;
+        let stride: c_int = (w * 4) as c_int;
         let params = [
             MpvRenderParam { type_: 17, data: size.as_ptr() as *mut c_void },
             MpvRenderParam { type_: 18, data: fmt.as_ptr() as *mut c_void },
-            MpvRenderParam { type_: 19, data: (&stride as *const usize) as *mut c_void },
+            MpvRenderParam { type_: 19, data: (&stride as *const c_int) as *mut c_void },
             MpvRenderParam { type_: 20, data: buf.as_mut_ptr() as *mut c_void },
             MpvRenderParam { type_: 0, data: ptr::null_mut() },
         ];
@@ -374,6 +364,7 @@ struct Engine {
     load_sent: bool,
     load_started: Instant,
     ended: bool,
+    last_sub_text: Option<String>,
 }
 
 impl Engine {
@@ -417,8 +408,11 @@ impl Engine {
                     }
                 }
             }
-            // Render a queued frame.
-            if self.out_w > 0 && self.out_h > 0 && !self.ended {
+            // Render a queued frame (allocate only when mpv actually has
+            // a new one — paused video produces none, so no redraws).
+            if self.out_w > 0 && self.out_h > 0 && !self.ended
+                && unsafe { (self.mpv.fns.render_update)(self.rctx) } & MPV_RENDER_UPDATE_FRAME != 0
+            {
                 let n = self.out_w * self.out_h * 4;
                 let mut buf = vec![0u8; n];
                 if self.mpv.render_frame(self.rctx, self.out_w, self.out_h, &mut buf) {
@@ -440,6 +434,14 @@ impl Engine {
                     }
                     self.cx.redraw();
                 }
+            }
+            // `load` goes out once the item is ready — tracks + video size
+            // known, or 3 s after loadfile (mirrors av.rs's timeout).
+            if !self.load_sent
+                && self.load_started.elapsed() >= Duration::from_secs(3)
+                && self.vw > 0
+            {
+                self.emit_tracks_load();
             }
             // Events.
             let ev = unsafe { (self.mpv.fns.wait_event)(self.mpv.ctx, 0.05) };
@@ -490,6 +492,11 @@ impl Engine {
                 self.load_sent = false;
                 self.first_frame = false;
                 self.ended = false;
+                self.start_at_done = false;
+                self.duration = None;
+                self.tracks_json = Value::Null;
+                self.load_started = Instant::now();
+                self.last_sub_text = None;
                 match url {
                     Some(u) => {
                         let _ = self.mpv.command(&["loadfile", &u]);
@@ -573,11 +580,14 @@ impl Engine {
                     self.time_pos = t;
                     if self.last_progress.elapsed() >= Duration::from_millis(250) {
                         self.last_progress = Instant::now();
-                        let buffered = self.time_pos + self.buffered;
-                        let playable = self.duration.unwrap_or(self.time_pos);
+                        // Buffered end ≈ position + demuxer cache ahead,
+                        // clamped to the duration when known.
+                        let buffered = (self.time_pos + self.buffered)
+                            .min(self.duration.unwrap_or(f64::INFINITY));
+                        let playable = self.duration.unwrap_or(buffered);
                         self.emit(
                             "progress",
-                            json!({ "currentTime": self.time_pos, "buffered": buffered.min(playable.max(buffered)), "playable": playable }),
+                            json!({ "currentTime": self.time_pos, "buffered": buffered, "playable": playable }),
                         );
                     }
                 }
@@ -597,7 +607,10 @@ impl Engine {
             }
             4 => {
                 if let Some(b) = node_flag(node) {
-                    self.emit("buffer", json!({ "stalled": b, "reason": if b { "cache" } else { "" } }));
+                    self.emit(
+                        "buffer",
+                        json!({ "stalled": b, "reason": if b { json!("cache") } else { Value::Null } }),
+                    );
                 }
             }
             5 => {
@@ -631,8 +644,9 @@ impl Engine {
             }
             10 => {
                 if let Some(text) = node_string(node) {
-                    if !text.is_empty() {
-                        self.emit("cues", json!({ "time": self.time_pos, "lines": [text] }));
+                    if self.last_sub_text.as_deref() != Some(text.as_str()) {
+                        self.last_sub_text = Some(text.clone());
+                        self.emit("cues", json!({ "time": self.time_pos, "lines": cue_lines(&text) }));
                     }
                 }
             }
@@ -658,9 +672,9 @@ impl Engine {
         self.emit(
             "load",
             json!({
-                "duration": self.duration.unwrap_or(0.0),
-                "width": self.out_w,
-                "height": self.out_h,
+                "duration": self.duration,
+                "width": self.vw,
+                "height": self.vh,
                 "audioTracks": audio,
                 "subtitleTracks": subs,
                 "ms": self.load_started.elapsed().as_millis() as u64,
@@ -676,6 +690,38 @@ impl Engine {
             }
         }
     }
+}
+
+/// mpv `sub-text` → the contract's `lines`: newline-split, override
+/// (`{\...}`) and markup (`<...>`) tags stripped, empties dropped.
+fn cue_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| {
+            let mut out = String::with_capacity(l.len());
+            let mut chars = l.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '{' => {
+                        for c in chars.by_ref() {
+                            if c == '}' {
+                                break;
+                            }
+                        }
+                    }
+                    '<' => {
+                        for c in chars.by_ref() {
+                            if c == '>' {
+                                break;
+                            }
+                        }
+                    }
+                    _ => out.push(c),
+                }
+            }
+            out.trim().to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 fn parse_tracks(node: &MpvNode) -> Value {
@@ -704,6 +750,7 @@ fn parse_tracks(node: &MpvNode) -> Value {
             let mut lang = String::new();
             let mut title = String::new();
             let mut selected = false;
+            let mut is_default = false;
             for j in 0..tl.num as usize {
                 let k = unsafe { CStr::from_ptr(*tl.keys.add(j)) }.to_string_lossy().into_owned();
                 let v = unsafe { &*tl.values.add(j) };
@@ -719,13 +766,15 @@ fn parse_tracks(node: &MpvNode) -> Value {
                     "lang" => lang = node_string(v).unwrap_or_default(),
                     "title" => title = node_string(v).unwrap_or_default(),
                     "selected" => selected = node_flag(v).unwrap_or(false),
+                    "default" => is_default = node_flag(v).unwrap_or(false),
                     _ => {}
                 }
             }
             if id.is_empty() {
                 continue;
             }
-            let entry = json!({ "id": id, "lang": lang, "title": title, "selected": selected });
+            let label = if !title.is_empty() { title } else if !lang.is_empty() { lang.clone() } else { kind.clone() };
+            let entry = json!({ "id": id, "label": label, "lang": lang, "default": is_default, "selected": selected });
             match kind.as_str() {
                 "audio" => audio.push(entry),
                 "sub" => subs.push(entry),
@@ -737,6 +786,13 @@ fn parse_tracks(node: &MpvNode) -> Value {
 }
 
 // --- Player (main-thread side) ------------------------------------------------------
+
+/// Whether `libmpv-2.dll` (+ its deps) loads on this machine — probed once
+/// for `sys.nativeVideoInfo` so the app falls back when it isn't shipped.
+pub(crate) fn dll_available() -> bool {
+    static OK: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| Lib::load().is_some());
+    *OK
+}
 
 pub(crate) static LIVE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PLAYING: AtomicUsize = AtomicUsize::new(0);
@@ -955,6 +1011,7 @@ impl Player {
                     load_sent: false,
                     load_started: Instant::now(),
                     ended: false,
+                    last_sub_text: None,
                 };
                 engine.run();
             });
@@ -1123,4 +1180,16 @@ pub(crate) fn control(handle: u64, data: &Value) -> bool {
 /// scale factor only over/under-caps the decode size slightly.
 fn window_scale_hint() -> f64 {
     1.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cue_lines;
+
+    #[test]
+    fn cue_lines_strips_markup() {
+        assert_eq!(cue_lines("Hello <i>world</i>\n{\\an8}second line"), vec!["Hello world", "second line"]);
+        assert_eq!(cue_lines("{\\an8}\n\nplain"), vec!["plain"]);
+        assert!(cue_lines("").is_empty());
+    }
 }

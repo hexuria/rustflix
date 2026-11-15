@@ -239,20 +239,20 @@ libmpv specifics (verified against `include/mpv/render.h`):
 - **Runtime-unverified end to end** — the M1 crash kills the app before
   any component renders. Compile-clean only.
 - `progress.buffered` is approximated (`time-pos + demuxer-cache-
-  duration`), not exact buffered ranges.
-- `cues` emits the current `sub-text` on change; cue in/out timing is
-  not provided (same limitation noted for macOS evaluation).
+  duration` clamped to duration), not exact buffered ranges.
+- `cues` emits the current `sub-text` as `{time, lines}` (markup
+  stripped) on change; no cue in/out timing — same limitation as macOS.
 - `window_scale_hint()` in `control()` returns 1.0 — the host-call
   `frame` path can't see the window's scale factor, so the decode cap
   may be off by the DPI scale (component prop path passes real pixels).
-- `rate` events report mpv's `speed`; `paused` comes from the `pause`
-  property — verify shapes against `app/lib/nativevideo.tsx` at runtime.
-- Track `id`s are emitted as strings of mpv's numeric ids; `selectAudio`/
-  `selectSubtitle` pass them back to `aid`/`sid`. `null` subtitle → `sid=no`.
+- `rate`/`paused` come from mpv's `speed`/`pause` properties.
+- Track `id`s are mpv's numeric ids as strings; `selectAudio`/
+  `selectSubtitle` pass them back to `aid`/`sid`. `null` → `sid=no`.
+- `sys.nativeVideoInfo.available` probes `LoadLibrary(libmpv-2.dll)`
+  once; without the DLL the app keeps the web-page player.
 - Audio on this VM: SSH session has no audio endpoint (`AO_INIT_FAILED`
   in the smoke test); WASAPI on the interactive desktop unverified.
 - `libmpv-2.dll` + `vulkan-1.dll` must ship beside the exe (or in `lib/mpv/`).
-- Dead-code warnings remain (`prop_string`, `frame_size`, `MpvEventSeek`).
 
 ### libmpv smoke test — PASSED (2025-11-15)
 

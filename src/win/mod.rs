@@ -4,9 +4,11 @@
 //! - [`shell`]: free space, the Recycle Bin and Explorer (`fs.*`, `dl.*`).
 //! - [`webview`]: the WebView2 web views (`sys.webGuard`, `sys.webCookies`,
 //!   `sys.webViews`, `sys.webBackground`).
+//! - [`window`]: the app window's caption (dragging, Snap, double click).
 
 pub(crate) mod shell;
 pub(crate) mod webview;
+pub(crate) mod window;
 
 /// The app's id (main.rs's fallback when the bundle names none): the
 /// folder its per-user data lives in.

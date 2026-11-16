@@ -610,3 +610,30 @@ Verified (release build, real source "vidfast", this VM):
   read back plain).
 - Still not on Windows: the FPS monitor's native panel (`src/perf`, a macOS
   developer tool).
+
+## Milestone 7 — window — DONE
+
+Verified with injected mouse input on this VM (`m7-*.png`):
+
+- **Caption buttons**: minimize (iconic), maximize ↔ restore, close (the
+  process exits; GPUI logs three teardown errors on the way out —
+  "window not found", "Class not registered", "Invalid window handle").
+- **Dragging, Snap, double click** were broken: NSH marks its `windowDrag`
+  views as caption (`HTCAPTION`), but its drag area also handles the press
+  (`stop_propagation`, nsh-platform-gpui `chrome.rs` `drag_area`), so gpui-fast
+  reports it handled and `DefWindowProc` never sees it; NSH's fallback
+  `start_window_move` does nothing on Windows and its double click only
+  maximizes (`zoom_window`). `src/win/window.rs` subclasses GPUI's windows
+  so a left press or double click on the caption goes to `DefWindowProc`,
+  as for any captioned window. After it: the title bar drags the window;
+  dragging to the top edge maximizes (Aero Snap); dragging a maximized
+  window restores it; Win+← snaps to the left half; a double click toggles
+  maximize. The title bar's own buttons (back/forward) still work.
+- **Full screen**: the player's full-screen button fills the screen
+  (`0,0–1920,1080`, over the taskbar) and restores the window.
+- Not verified: the Esc key in full screen (the test input could not take
+  keyboard focus from the session's foreground lock); Snap Layouts (the
+  Windows 11 flyout on the maximize button — this is a Windows 10–based
+  Server; the maximize button answers `HTMAXBUTTON`, which Windows 11 needs).
+- To report upstream (nsh): `drag_area` should let caption presses through
+  on Windows (or `start_window_move` should start the OS move loop there).

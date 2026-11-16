@@ -73,7 +73,10 @@ fn main() -> std::process::ExitCode {
     // Windows: WebView2's controller creation hooked before any web view
     // exists (src/win/webview.rs), once logging is up.
     #[cfg(target_os = "windows")]
-    win::webview::install();
+    {
+        win::webview::install();
+        win::window::install();
+    }
 
     // SAFETY: the bundle is this app's own build output (`build.rs`), or
     // one its developer names, the same trust as the app's resources.

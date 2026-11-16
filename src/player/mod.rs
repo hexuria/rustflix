@@ -21,6 +21,8 @@ pub(crate) mod av;
 mod component;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod win;
 
 use nsh_engine::HostChannel;
 use nsh_platform_gpui::Components;
@@ -28,14 +30,16 @@ use nsh_platform_gpui::Components;
 /// The component's name in `nativeComponent(...)`.
 pub(crate) const NAME: &str = "rustflix.video";
 
-/// Registers `rustflix.video` (macOS, Linux; elsewhere it renders an
-/// empty view).
+/// Registers `rustflix.video` (macOS, Linux, Windows; elsewhere it renders
+/// an empty view).
 pub(crate) fn register(components: &Components) {
     #[cfg(target_os = "macos")]
     components.register(NAME, std::rc::Rc::new(|cx| Box::new(component::Video::new(cx))));
     #[cfg(target_os = "linux")]
     components.register(NAME, std::rc::Rc::new(|cx| Box::new(linux::component::Video::new(cx))));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    components.register(NAME, std::rc::Rc::new(|cx| Box::new(win::component::Video::new(cx))));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let _ = components;
 }
 
@@ -46,6 +50,10 @@ pub(crate) fn register_host(host: &HostChannel) {
     // downloader's 127.0.0.1 server (`…/<token>/<id>/<file>`, Range + HLS).
     host.handle("sys.nativeVideoInfo", |call| {
         let info = |pip: bool| {
+            // Windows: only where Media Foundation's media engine exists.
+            #[cfg(target_os = "windows")]
+            let available = win::available();
+            #[cfg(not(target_os = "windows"))]
             let available = cfg!(any(target_os = "macos", target_os = "linux"));
             serde_json::json!({
                 "ok": true, "available": available, "version": 1,
@@ -61,7 +69,9 @@ pub(crate) fn register_host(host: &HostChannel) {
         dispatch2::DispatchQueue::main().exec_async(move || call.resolve(info(av::pip_supported())));
         #[cfg(target_os = "linux")]
         call.resolve(info(linux::pip_supported()));
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        call.resolve(info(win::pip_supported()));
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         call.resolve(info(false));
     });
     host.handle("sys.nativeVideo", |call| {
@@ -81,7 +91,14 @@ pub(crate) fn register_host(host: &HostChannel) {
             let ok = data.get("handle").and_then(serde_json::Value::as_u64).is_some_and(|h| linux::control(h, &data));
             call.resolve(serde_json::json!({ "ok": ok }));
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            let data = call.data().clone();
+            // The player's thread does the work; this only queues it.
+            let ok = data.get("handle").and_then(serde_json::Value::as_u64).is_some_and(|h| win::control(h, &data));
+            call.resolve(serde_json::json!({ "ok": ok }));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         call.resolve(serde_json::json!({ "ok": false }));
     });
     host.handle("sys.nativePlayers", |call| {
@@ -95,7 +112,12 @@ pub(crate) fn register_host(host: &HostChannel) {
             linux::LIVE.load(std::sync::atomic::Ordering::Relaxed),
             linux::PLAYING.load(std::sync::atomic::Ordering::Relaxed),
         );
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        let (live, playing) = (
+            win::LIVE.load(std::sync::atomic::Ordering::Relaxed),
+            win::PLAYING.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let (live, playing) = (0usize, 0usize);
         call.resolve(serde_json::json!({ "ok": true, "live": live, "playing": playing }));
     });

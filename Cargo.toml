@@ -49,6 +49,32 @@ smallvec = "1.16.5"
 gtk = "0.18"
 webkit2gtk = { version = "2.0.1", features = ["v2_40"] }
 
+# The Windows player (src/player/win): Media Foundation's media engine
+# decodes (part of Windows, nothing to install); frames go through a D3D11
+# texture into GPUI's image atlas; the shell calls (`fs.*`: free space,
+# the Recycle Bin, Explorer) are src/win/shell.rs. `windows` is the version
+# gpui-fast-windows already builds; `image`/`smallvec` are in the tree
+# through gpui-fast.
+[target.'cfg(target_os = "windows")'.dependencies]
+image = "0.25.10"
+smallvec = "1.16.5"
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore
 # (all already in the tree through wry).
 [target.'cfg(target_os = "macos")'.dependencies]

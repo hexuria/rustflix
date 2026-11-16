@@ -160,6 +160,7 @@ impl Element for FrameElement {
         }
         let image_bounds = self.object_fit.get_bounds(bounds, self.image.size(0));
         let _ = window.paint_image(bounds, image_bounds, Corners::default(), self.image.clone(), 0, false);
+        mf::PAINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

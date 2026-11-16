@@ -450,6 +450,8 @@ struct Target {
 }
 
 const TICK: Duration = Duration::from_millis(250);
+/// Video frames painted by the component, for the tick's trace line.
+pub(crate) static PAINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// How often a new frame is asked for while one may be due.
 const FRAME_POLL: Duration = Duration::from_millis(8);
 /// How long `progress` reports `startAt` while the seek to it lands.
@@ -466,6 +468,9 @@ struct Worker {
     tx: Sender<Msg>,
 
     device: Option<(ID3D11Device, ID3D11DeviceContext, IMFDXGIDeviceManager)>,
+    /// Frames through the CPU (`super::wic`) for the current engine, where
+    /// there is no GPU; `None`: through `target` on the device.
+    cpu: Option<super::wic::CpuTarget>,
     media: Option<Media>,
     target: Option<Target>,
     /// Bumped for every new engine; callbacks of an older one are dropped.
@@ -513,6 +518,7 @@ impl Worker {
             shared,
             tx,
             device: None,
+            cpu: None,
             media: None,
             target: None,
             generation: 0,
@@ -736,7 +742,12 @@ impl Worker {
     /// A media engine for `url`, loading; playback starts once its metadata
     /// is in (`on_event`), so `startAt` goes out first.
     fn open(&mut self, url: &str) -> windows_core::Result<Media> {
-        let manager = self.device().ok_or_else(|| windows_core::Error::from(MF_E_UNEXPECTED))?;
+        let manager = self.device();
+        let cpu = manager.is_none() || super::wic::wanted(self.device.as_ref().map(|(d, _, _)| d));
+        if cpu {
+            log::info!("player {}: frames through the CPU (no GPU adapter)", self.id);
+        }
+        self.cpu = cpu.then(super::wic::CpuTarget::default);
         let generation = self.generation;
         let notify: IMFMediaEngineNotify =
             Notify { tx: Mutex::new(self.tx.clone()), generation }.into();
@@ -746,8 +757,12 @@ impl Worker {
             MFCreateAttributes(&mut attrs, 3)?;
             let attrs = attrs.ok_or_else(|| windows_core::Error::from(MF_E_UNEXPECTED))?;
             attrs.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify)?;
-            attrs.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, &manager)?;
-            attrs.SetUINT32(&MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM.0 as u32)?;
+            // Without a DXGI manager the engine decodes in software and
+            // transfers into WIC bitmaps (`super::wic`).
+            if let (false, Some(manager)) = (cpu, manager.as_ref()) {
+                attrs.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, manager)?;
+                attrs.SetUINT32(&MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM.0 as u32)?;
+            }
             let factory: IMFMediaEngineClassFactory =
                 CoCreateInstance(&CLSID_MFMediaEngineClassFactory, None, CLSCTX_INPROC_SERVER)?;
             let engine = factory.CreateInstance(0, &attrs)?;
@@ -1159,10 +1174,17 @@ impl Worker {
             return;
         }
         let size = self.out_size();
+        let t0 = Instant::now();
         match self.transfer(&engine, size) {
             Ok(pixels) => {
+                let t1 = Instant::now();
                 self.last_pts = Some(pts);
                 self.publish(size, pixels);
+                log::trace!(
+                    "player {}: frame {}x{} transfer {:.1} ms publish {:.1} ms",
+                    self.id, size.0, size.1,
+                    (t1 - t0).as_secs_f64() * 1000.0, t1.elapsed().as_secs_f64() * 1000.0
+                );
             }
             Err(e) => log::debug!("player {}: frame transfer failed: {e}", self.id),
         }
@@ -1171,6 +1193,9 @@ impl Worker {
     /// Scales the engine's current frame into the BGRA texture and reads
     /// it back: one buffer, rows packed, alpha opaque.
     fn transfer(&mut self, engine: &IMFMediaEngine, size: (u32, u32)) -> windows_core::Result<Vec<u8>> {
+        if let Some(cpu) = self.cpu.as_mut() {
+            return cpu.transfer(engine, size);
+        }
         let Some((device, ctx, _)) = self.device.clone() else {
             return Err(MF_E_UNEXPECTED.into());
         };
@@ -1303,8 +1328,8 @@ impl Worker {
         }
 
         log::trace!(
-            "player {}: tick pos {pos:.2} queried {queried:.2} paused {}/{engine_paused} frames {} ranges {ranges:?}",
-            self.id, self.paused, self.frames
+            "player {}: tick pos {pos:.2} queried {queried:.2} paused {}/{engine_paused} frames {} painted {} ranges {ranges:?}",
+            self.id, self.paused, self.frames, PAINTED.load(Ordering::Relaxed)
         );
         // buffered / playable: the end of the buffered range playback is in.
         let buffered = ranges.and_then(|r| {

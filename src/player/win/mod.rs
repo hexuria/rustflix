@@ -20,6 +20,7 @@
 
 pub(crate) mod component;
 mod mf;
+mod wic;
 
 pub(crate) use mf::{LIVE, PLAYING, available, control};
 

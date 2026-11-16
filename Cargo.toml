@@ -59,6 +59,13 @@ webkit2gtk = { version = "2.0.1", features = ["v2_40"] }
 image = "0.25.10"
 smallvec = "1.16.5"
 windows-core = "0.62"
+# The WebView2 web views (src/win/webview.rs): the bindings wry builds on,
+# with the `windows` crates of their own version (all already in the tree).
+webview2-com = "0.38"
+# The content rules' URL filters (already in the tree).
+regex = "1.13"
+windows-61 = { package = "windows", version = "0.61", features = ["Win32_Foundation"] }
+windows-core61 = { package = "windows-core", version = "0.61" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -66,13 +73,17 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore

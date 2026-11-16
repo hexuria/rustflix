@@ -8666,6 +8666,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
+ "regex",
  "rolldown_std_utils",
  "serde",
  "serde_json",
@@ -8673,7 +8674,10 @@ dependencies = [
  "ureq",
  "url",
  "webkit2gtk",
+ "webview2-com",
+ "windows 0.61.3",
  "windows 0.62.2",
+ "windows-core 0.61.2",
  "windows-core 0.62.2",
 ]
 

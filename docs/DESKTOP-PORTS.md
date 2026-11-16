@@ -522,3 +522,59 @@ on the GPU (here: WARP) before the readback.
   fixed for both).
 - Not tested: downloading a title in the app (the resolver needs Milestone
   5 first); the downloader's own tests (local HTTP server, HLS, resume) pass.
+
+## Milestone 5 — ad and pop-up blocking for web views — DONE
+
+**Reaching WebView2.** wry builds every web view's controller itself, NSH
+keeps the `wry::WebView`, and wry's `WRY_WEBVIEW` window stores no pointer
+to it, so the controller cannot be found from the window. Options weighed:
+
+| Option | Verdict |
+|---|---|
+| Patch WebView2's own entry point (`ICoreWebView2Environment10::CreateCoreWebView2ControllerWithOptions`, + the base `CreateCoreWebView2Controller`) in the environment class's COM vtable, at startup | **chosen**: the Windows twin of the macOS guard's WebKit method hooks; COM vtable layouts are a fixed ABI and the class's vtable is shared by every environment of the loaded runtime; each controller is set up before wry gets it, before its first navigation |
+| Chromium DevTools protocol (`--remote-debugging-port` via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`) | rejected: opens a local port that any process could drive (cookies included) |
+| A hook in NSH (hand the host each `wry::WebView`) | the proper long-term fix; needs an upstream change |
+
+`src/win/webview.rs`: `install()` (after logging starts, before GPUI) makes a
+throwaway environment in its own temp profile and replaces the two vtable
+slots (4 ms here). The replacement wraps wry's completion handler; for each
+new controller `adopt` adds, then hands it on:
+
+- the guard script (`adblock.ts` GUARD_JS + the media sniffer) with
+  `AddScriptToExecuteOnDocumentCreated` — it runs in child frames too (the
+  resolver's sniffer reports streams from the embed's frames);
+- a `WebResourceRequested` filter over every frame's requests
+  (`AddWebResourceRequestedFilterWithRequestSourceKinds`): the WebKit
+  content rules `sys.webGuard` sends (`rules`, `resolverRules` for the
+  marked resolver) compiled to one `RegexSet` each, evaluated in order (last
+  match wins; `ignore-previous-rules`), `resource-type`/`load-type` as WebKit
+  does; a blocked request gets a 403;
+- `NewWindowRequested` → handled (no pop-up windows, as on macOS);
+- `NavigationStarting` (main frame) → `webguard::verdict`, the same rule as
+  macOS (embed hosts, the site shown, its redirects while pending until
+  `ContentLoading`); `FrameNavigationStarting` → no non-web schemes;
+- camera/microphone permission requests → denied while on.
+
+`markResolver` finds the resolver's view by its document title, applies the
+resolver rules and gives it a real viewport: its `WRY_WEBVIEW` window is
+sized 1600×900 and clipped to a 1×1 window region, the controller made
+visible (NSH never places a view with no geometry, so it kept its 200×200
+creation size — the Linux symptom, `candidates=0`). `sys.webCookies` reads
+the profile's cookie manager (HttpOnly included); `sys.webViews` and
+`sys.webBackground` work on Windows too.
+
+Verified (release build, real source "vidfast", this VM):
+
+- Hook in 4 ms; the guard took both web views; the resolver was marked.
+- **Native playback of a real title**: the resolver found the HLS master in
+  ~16 s (`candidates=2`, "via xhr from https://vidfast.vc" — the sniffer
+  running in the embed's frames); `rustflix.video` played it through the
+  local proxy from the stored resume point (`m5-full.png`: the app's own
+  window, no web page). The 1080p stream saturates both vCPUs here (WARP:
+  GPUI's redraw + Media Foundation's colour conversion on the CPU).
+- **Web-page player** (`rustflix.nativeplayer` = "0"): the source's page
+  plays; 17 requests to ad/tracker hosts blocked in the first ~40 s
+  (googletagmanager, cloudflareinsights, three throwaway ad domains); clicks
+  on the page opened no window.
+- Not exercised: a refused main-frame navigation (none attempted in the
+  runs); `sys.webCookies` output not inspected yet.

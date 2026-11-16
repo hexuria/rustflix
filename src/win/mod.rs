@@ -2,8 +2,11 @@
 //!
 //! - [`before_gpui`]: process settings GPUI reads when it starts.
 //! - [`shell`]: free space, the Recycle Bin and Explorer (`fs.*`, `dl.*`).
+//! - [`webview`]: the WebView2 web views (`sys.webGuard`, `sys.webCookies`,
+//!   `sys.webViews`, `sys.webBackground`).
 
 pub(crate) mod shell;
+pub(crate) mod webview;
 
 /// Called first thing in `main`, before any thread exists and before
 /// GPUI's platform is created.

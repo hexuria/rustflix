@@ -70,6 +70,10 @@ fn main() -> std::process::ExitCode {
     // env_logger, with the engine's `nsh::perf` lines going to the perf
     // recorder (src/perf.rs) instead of stderr.
     perf::init_logging();
+    // Windows: WebView2's controller creation hooked before any web view
+    // exists (src/win/webview.rs), once logging is up.
+    #[cfg(target_os = "windows")]
+    win::webview::install();
 
     // SAFETY: the bundle is this app's own build output (`build.rs`), or
     // one its developer names, the same trust as the app's resources.

@@ -62,7 +62,18 @@ pub(crate) fn register(host: &HostChannel) {
             crate::webkitgtk::handle_cookies(url, call);
         });
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        host.handle("sys.webGuard", |call| {
+            let data = call.data().clone();
+            crate::win::webview::handle_guard(data, call);
+        });
+        host.handle("sys.webCookies", |call| {
+            let url = call.data().get("url").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            crate::win::webview::handle_cookies(url, call);
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     for name in ["sys.webGuard", "sys.webCookies"] {
         host.handle(name, |call| call.resolve(serde_json::json!({ "ok": false })));
     }
@@ -135,7 +146,7 @@ fn base64(b: &[u8]) -> String {
 /// The registrable part of a host ("a.b.example.co.uk" → "example.co.uk"),
 /// as app/lib/adblock.ts `siteOf`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn site(host: &str) -> String {
+pub(crate) fn site(host: &str) -> String {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
     let p: Vec<&str> = h.split('.').collect();
     if p.len() <= 2 {

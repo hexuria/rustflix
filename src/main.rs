@@ -202,13 +202,23 @@ mod cache {
                 _ => env("XDG_CACHE_HOME").or_else(|| home.as_ref().map(|h| h.join(".cache"))),
             };
             let mac_home = home.filter(|_| own && os == "macos");
+            // Windows: the WebView2 profile the web views use
+            // (src/win/webview.rs: `%LOCALAPPDATA%\<id>\WebView2`); its cache,
+            // and the whole profile (cookies, storage) as site data.
+            let profile = caches
+                .as_ref()
+                .filter(|_| own && os == "windows")
+                .map(|c| c.join(id).join("WebView2").join("EBWebView").join("Default"));
             Paths {
                 app_id: id.to_owned(),
                 images: caches.filter(|_| own).map(|c| c.join(id).join("images")),
                 web: mac_home
                     .as_ref()
-                    .map(|h| h.join("Library/Caches").join(id).join("WebKit")),
-                site: mac_home.map(|h| h.join("Library/WebKit").join(id).join("WebsiteData")),
+                    .map(|h| h.join("Library/Caches").join(id).join("WebKit"))
+                    .or_else(|| profile.as_ref().map(|p| p.join("Cache"))),
+                site: mac_home
+                    .map(|h| h.join("Library/WebKit").join(id).join("WebsiteData"))
+                    .or(profile),
             }
         }
 
@@ -385,7 +395,20 @@ mod cache {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Windows: the live WebView2 profile (`ClearBrowsingData`).
+    #[cfg(target_os = "windows")]
+    mod webkit {
+        pub(super) fn remove(_app_id: &str, all: bool) -> bool {
+            let ok = crate::win::webview::clear_browsing_data(all);
+            if ok {
+                // WebView2's processes finish deleting files after it answers.
+                std::thread::sleep(super::SETTLE);
+            }
+            ok
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     mod webkit {
         pub(super) fn remove(_app_id: &str, _all: bool) -> bool {
             false

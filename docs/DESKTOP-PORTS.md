@@ -578,3 +578,35 @@ Verified (release build, real source "vidfast", this VM):
   on the page opened no window.
 - Not exercised: a refused main-frame navigation (none attempted in the
   runs); `sys.webCookies` output not inspected yet.
+
+## Milestone 6 — the remaining host calls — DONE
+
+- **`sys.pickFolder`**: `IFileOpenDialog` with `FOS_PICKFOLDERS`, modal to the app
+  window, starting in the current folder; `{ok, path}` / `{ok, cancelled}` as on
+  Linux (`src/win/shell.rs`). Verified: Settings → Downloads → Change… → the
+  system picker → Videos → "Move 1 download?" → moved (`m6-picker.png`,
+  `m6-pick-b.png`); Use default moved it back.
+- **`cache.clear` of web data**: the web views' WebView2 profile now lives in
+  `%LOCALAPPDATA%\com.hexuria.rustflix\WebView2` (`WEBVIEW2_USER_DATA_FOLDER`,
+  set after the hook's probe; a value the user set wins). WebView2's default
+  is a folder beside the executable, which fails where that is read-only
+  (Program Files). `cache.info` measures `…\EBWebView\Default\Cache` (video
+  pages) and `…\Default` (site data); `cache.clear` goes through the live
+  profile (`ICoreWebView2Profile2::ClearBrowsingData`: disk cache + cache
+  storage; site data: all site kinds + disk cache), as macOS goes through
+  `WKWebsiteDataStore`. Verified: Storage & privacy showed 8.9 MB / 1.6 MB /
+  4.4 MB; Clear → "Cleared 1.1 MB of video page files" (`m6-cleared.png`).
+- **`sys.focusContent`**: keyboard focus back to the app's GPUI window
+  (`SetFocus`) after a web view (a child window) held it. Implemented, not
+  exercised by a test.
+- `sys.webViews`, `sys.webBackground`: Windows versions (milestone 5).
+- **TSX** (`platform.os` gated): `app/lib/system.ts` asks the `sys.*` calls on
+  Windows too (they were macOS/Linux only); `app/lib/downloads.ts` takes
+  Windows folder paths (drive or UNC; `\\` separators) in `changeDownloadDir`,
+  which only accepted paths starting with `/`.
+- **Download folder paths**: `folder::validate` canonicalises, which on Windows
+  gives verbatim paths (`\\?\C:\…`) — they reached the settings and the records.
+  The folder is now kept in its plain form (and a stored verbatim one is
+  read back plain).
+- Still not on Windows: the FPS monitor's native panel (`src/perf`, a macOS
+  developer tool).

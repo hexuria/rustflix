@@ -81,6 +81,10 @@ pub(crate) fn validate(path: &str, current: &Path, forbidden: &[PathBuf], record
     let probe = r.join(format!(".rustflix-write-test-{}", std::process::id()));
     fs::write(&probe, b"x").map_err(|e| format!("Can't write to {}: {e}", r.display()))?;
     let _ = fs::remove_file(&probe);
+    // Windows: `canonicalize` answers verbatim paths (`\\?\C:\…`); the folder
+    // is stored, shown and handed to the shell in its plain form.
+    #[cfg(windows)]
+    let r = crate::win::shell::plain(&r);
     Ok(r)
 }
 

@@ -39,7 +39,7 @@ use std::{
 
 use serde_json::{Value, json};
 use webview2_com::{
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ContentLoadingEventHandler,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ClearBrowsingDataCompletedHandler, ContentLoadingEventHandler,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     GetCookiesCompletedHandler, Microsoft::Web::WebView2::Win32::*,
     NavigationStartingEventHandler, NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
@@ -73,7 +73,7 @@ static QUEUE: Mutex<Vec<Box<dyn FnOnce() + Send>>> = Mutex::new(Vec::new());
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// Runs `f` on the main thread, from the message loop (or a nested pump).
-fn on_main(f: impl FnOnce() + Send + 'static) {
+pub(crate) fn on_main(f: impl FnOnce() + Send + 'static) {
     QUEUE.lock().unwrap().push(Box::new(f));
     let hwnd = WINDOW.load(Ordering::SeqCst);
     if hwnd != 0 {
@@ -348,6 +348,40 @@ unsafe fn patch(object: *mut c_void, index: usize, with: usize) -> Option<usize>
 /// leave web views unguarded (logged).
 pub(crate) fn install() {
     let started = Instant::now();
+    // WEBVIEW2_USER_DATA_FOLDER overrides the folder given below: keep it
+    // out of the probe (its options differ from wry's), restore it after.
+    let user_folder = std::env::var_os(USER_DATA_FOLDER);
+    // SAFETY: Windows guards the process environment with its own lock;
+    // no Rust code reads it concurrently this early.
+    unsafe { std::env::remove_var(USER_DATA_FOLDER) };
+    hook(started);
+    set_user_data_folder(user_folder);
+}
+
+/// The variable WebView2's loader reads for the profile folder when the app
+/// gives none (wry gives none).
+const USER_DATA_FOLDER: &str = "WEBVIEW2_USER_DATA_FOLDER";
+
+/// The web views' profile folder: `%LOCALAPPDATA%\<app id>\WebView2` (beside
+/// the engine's caches). WebView2's default is a folder beside the
+/// executable, which fails where that is read-only (Program Files) and keeps
+/// web data out of `cache.clear`'s reach. A value the user set wins.
+pub(crate) fn user_data_folder() -> Option<std::path::PathBuf> {
+    std::env::var_os(USER_DATA_FOLDER)
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join(super::APP_ID).join("WebView2")))
+}
+
+fn set_user_data_folder(user: Option<std::ffi::OsString>) {
+    let folder = user.map(std::path::PathBuf::from).or_else(user_data_folder);
+    if let Some(folder) = folder {
+        // SAFETY: as in `install`.
+        unsafe { std::env::set_var(USER_DATA_FOLDER, &folder) };
+        log::info!("webview: WebView2 profile in {}", folder.display());
+    }
+}
+
+fn hook(started: Instant) {
     // SAFETY: the main thread's apartment: STA, as WebView2 and GPUI
     // (OleInitialize) want it. Never uninitialised: it lives as long as the
     // process.
@@ -815,4 +849,45 @@ pub(crate) fn handle_background(data: Value, call: nsh_engine::HostCall) {
         });
         call.resolve(json!({ "ok": true, "count": n }));
     });
+}
+
+/// `cache.clear` of web data (`all`: site data too — cookies, storage) through
+/// the live WebView2 profile the web views share, as macOS goes through
+/// `WKWebsiteDataStore`. Blocks the calling (cache) thread until WebView2
+/// answers; false when there is no web view or it fails.
+pub(crate) fn clear_browsing_data(all: bool) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    on_main(move || {
+        let webview = GUARD.with_borrow_mut(|g| {
+            prune(g);
+            g.views.values().next().map(|v| v.webview.clone())
+        });
+        let Some(webview) = webview else {
+            let _ = tx.send(false);
+            return;
+        };
+        let kinds = if all {
+            COREWEBVIEW2_BROWSING_DATA_KINDS(COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_SITE.0 | COREWEBVIEW2_BROWSING_DATA_KINDS_DISK_CACHE.0)
+        } else {
+            COREWEBVIEW2_BROWSING_DATA_KINDS(COREWEBVIEW2_BROWSING_DATA_KINDS_DISK_CACHE.0 | COREWEBVIEW2_BROWSING_DATA_KINDS_CACHE_STORAGE.0)
+        };
+        let done = tx.clone();
+        // SAFETY: main thread, live web view; the handler answers once.
+        let asked = unsafe {
+            webview.cast::<ICoreWebView2_13>().and_then(|w| w.Profile()).and_then(|p| p.cast::<ICoreWebView2Profile2>()).and_then(|p| {
+                p.ClearBrowsingData(
+                    kinds,
+                    &ClearBrowsingDataCompletedHandler::create(Box::new(move |result| {
+                        let _ = done.send(result.is_ok());
+                        Ok(())
+                    })),
+                )
+            })
+        };
+        if let Err(e) = asked {
+            log::warn!("webview: browsing data not cleared: {e}");
+            let _ = tx.send(false);
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(15)).unwrap_or(false)
 }

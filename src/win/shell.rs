@@ -198,6 +198,88 @@ pub(crate) fn reveal(path: &Path) -> bool {
     })
 }
 
+/// The app's top-level GPUI window (owned by the main thread), if any.
+/// Call on the main thread.
+fn app_window() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM},
+        System::Threading::GetCurrentThreadId,
+        UI::WindowsAndMessaging::{EnumThreadWindows, GetClassNameW, IsWindowVisible},
+    };
+    unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> windows_core::BOOL {
+        let mut name = [0u16; 64];
+        // SAFETY: a window of this thread; a buffer of ours.
+        let n = unsafe { GetClassNameW(hwnd, &mut name) } as usize;
+        if String::from_utf16_lossy(&name[..n]) == "GpuiFast::Window" && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            // SAFETY: `found` points at the caller's Option.
+            unsafe { *(found.0 as *mut Option<HWND>) = Some(hwnd) };
+            return false.into();
+        }
+        true.into()
+    }
+    let mut found: Option<HWND> = None;
+    // SAFETY: enumerates this thread's windows into a local.
+    let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(each), LPARAM(&mut found as *mut _ as isize)) };
+    found
+}
+
+/// `sys.focusContent`: keyboard focus back to the app's own window after a
+/// web view (a child window) had it — keys would otherwise keep going to the
+/// web view, hidden or not.
+pub(crate) fn focus_content(call: nsh_engine::HostCall) {
+    super::webview::on_main(move || {
+        let ok = app_window().is_some_and(|w| {
+            // SAFETY: the app's window, on its thread.
+            unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(w)) }.is_ok()
+        });
+        call.resolve(serde_json::json!({ "ok": ok }));
+    });
+}
+
+/// `sys.pickFolder {start?}`: the system folder picker (`IFileOpenDialog`,
+/// `FOS_PICKFOLDERS`), modal to the app's window. `{ok, path}`, `{ok,
+/// cancelled}` or `{ok: false, error}`, as on Linux.
+pub(crate) fn pick_folder(start: Option<String>, call: nsh_engine::HostCall) {
+    use windows::Win32::{
+        Foundation::ERROR_CANCELLED,
+        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree},
+        UI::Shell::{
+            FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+        },
+    };
+    // The dialog's own modal loop runs on the main thread, as GTK's does on
+    // Linux; the app keeps drawing meanwhile.
+    super::webview::on_main(move || {
+        // SAFETY: COM on the main thread (STA); strings freed once.
+        let out = unsafe {
+            (|| -> windows_core::Result<serde_json::Value> {
+                let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+                let opts = dlg.GetOptions()?;
+                dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)?;
+                dlg.SetTitle(windows_core::w!("Choose a folder"))?;
+                if let Some(dir) = start.filter(|s| !s.is_empty())
+                    && let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&wide(Path::new(&dir)), None)
+                {
+                    let _ = dlg.SetFolder(&item);
+                }
+                if let Err(e) = dlg.Show(app_window()) {
+                    if e.code() == ERROR_CANCELLED.to_hresult() {
+                        return Ok(serde_json::json!({ "ok": true, "cancelled": true }));
+                    }
+                    return Err(e);
+                }
+                let name = dlg.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+                let path = name.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(name.0 as *const _));
+                Ok(serde_json::json!({ "ok": true, "path": path }))
+            })()
+        };
+        let out = out.unwrap_or_else(|e| serde_json::json!({ "ok": false, "error": e.to_string() }));
+        log::info!("pickFolder: {out}");
+        call.resolve(out);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

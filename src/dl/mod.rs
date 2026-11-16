@@ -157,6 +157,10 @@ impl Manager {
         } else {
             PathBuf::from(&saved.dir)
         };
+        // Windows: a verbatim folder (`\\?\C:\…`) stored by an earlier build,
+        // in its plain form.
+        #[cfg(windows)]
+        let dir = crate::win::shell::plain(&dir);
         let m = Arc::new(Manager {
             st: Mutex::new(State {
                 records,

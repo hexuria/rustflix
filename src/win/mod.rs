@@ -8,6 +8,10 @@
 pub(crate) mod shell;
 pub(crate) mod webview;
 
+/// The app's id (main.rs's fallback when the bundle names none): the
+/// folder its per-user data lives in.
+pub(crate) const APP_ID: &str = "com.hexuria.rustflix";
+
 /// Called first thing in `main`, before any thread exists and before
 /// GPUI's platform is created.
 ///

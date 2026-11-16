@@ -34,7 +34,7 @@ use windows::Win32::{
         },
         Dxgi::{
             Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-            DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+            DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
             DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
             IDXGIFactory2, IDXGISwapChain1,
         },
@@ -129,14 +129,17 @@ impl Window {
         self.hwnd.0 as isize
     }
 
-    /// Moves it to `rect` (x, y, width, height in the parent's pixels).
-    pub(crate) fn place(&mut self, rect: (i32, i32, i32, i32)) {
+    /// Moves it to `rect` (x, y, width, height in the parent's pixels),
+    /// above the app's other child windows; `true` when it moved (a
+    /// caption window over it is to be raised again).
+    pub(crate) fn place(&mut self, rect: (i32, i32, i32, i32)) -> bool {
         if rect == self.rect {
-            return;
+            return false;
         }
         self.rect = rect;
         // SAFETY: a window of this thread.
         let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOP), rect.0, rect.1, rect.2, rect.3, SWP_NOACTIVATE) };
+        true
     }
 
     pub(crate) fn visible(&self) -> bool {
@@ -164,6 +167,8 @@ pub(crate) struct Presenter {
     device: Option<(ID3D11Device, ID3D11DeviceContext)>,
     chain: Option<(isize, (u32, u32), IDXGISwapChain1)>,
     shown: bool,
+    /// A chain was let go since the device last flushed.
+    released: bool,
 }
 
 impl Presenter {
@@ -194,8 +199,27 @@ impl Presenter {
                 self.device = device.zip(context);
             }
             let Some((device, context)) = self.device.as_ref() else { return Err(MF_E_UNEXPECTED.into()) };
+            // A new size for the same window: its buffers resized (a second
+            // swap chain for a window can fail while the first one's
+            // destruction is still deferred).
+            if let Some((of, s, chain)) = self.chain.as_mut() {
+                if *of == hwnd && *s != size {
+                    match chain.ResizeBuffers(0, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG(0)) {
+                        Ok(()) => *s = size,
+                        Err(e) => {
+                            log::debug!("player: swap chain not resized: {e}");
+                            self.chain = None;
+                        }
+                    }
+                }
+            }
             if self.chain.as_ref().is_none_or(|(of, s, _)| *of != hwnd || *s != size) {
-                self.chain = None;
+                if self.chain.take().is_some() || self.released {
+                    // The old chain's destruction done before a new one.
+                    context.ClearState();
+                    context.Flush();
+                }
+                self.released = false;
                 self.shown = false;
                 let factory: IDXGIFactory2 = device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
                 let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -232,7 +256,7 @@ impl Presenter {
     }
 
     pub(crate) fn release(&mut self) {
-        self.chain = None;
+        self.released |= self.chain.take().is_some();
         self.shown = false;
     }
 }
@@ -254,6 +278,8 @@ pub(crate) struct CaptionWindow {
     hwnd: HWND,
     /// What is on screen: the caption, the area and the scale it was drawn for.
     shown: Option<(Caption, (i32, i32, i32, i32), u32)>,
+    /// What could not be drawn: not tried again until something changes.
+    failed: Option<(Caption, (i32, i32, i32, i32), u32)>,
 }
 
 impl CaptionWindow {
@@ -285,7 +311,16 @@ impl CaptionWindow {
                 Some(instance.into()),
                 None,
             )?;
-            Ok(CaptionWindow { hwnd, shown: None })
+            Ok(CaptionWindow { hwnd, shown: None, failed: None })
+        }
+    }
+
+    /// Back above the picture's window (which went to the top as it moved).
+    pub(crate) fn raise(&self) {
+        if self.shown.is_some() {
+            use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOSIZE};
+            // SAFETY: a window of this thread.
+            let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
         }
     }
 
@@ -300,14 +335,18 @@ impl CaptionWindow {
     /// in the parent's pixels) at `scale` pixels a point.
     pub(crate) fn show(&mut self, caption: &Caption, area: (i32, i32, i32, i32), scale: f32) {
         let key = (caption.clone(), area, scale.to_bits());
-        if self.shown.as_ref() == Some(&key) {
+        if self.shown.as_ref() == Some(&key) || self.failed.as_ref() == Some(&key) {
             return;
         }
         match self.draw(caption, area, scale) {
-            Ok(()) => self.shown = Some(key),
+            Ok(()) => {
+                self.shown = Some(key);
+                self.failed = None;
+            }
             Err(e) => {
                 log::debug!("player: caption not drawn: {e}");
                 self.hide();
+                self.failed = Some(key);
             }
         }
     }
@@ -318,8 +357,8 @@ impl CaptionWindow {
             AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
             BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
             DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_WORDBREAK,
-            DeleteDC, DeleteObject, DrawTextW, FW_SEMIBOLD, OUT_DEFAULT_PRECIS, SelectObject,
-            SetBkMode, SetTextColor, TRANSPARENT,
+            DrawTextW, FW_SEMIBOLD, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor,
+            TRANSPARENT,
         };
         use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 
@@ -356,7 +395,9 @@ impl CaptionWindow {
                     w!("Segoe UI"),
                 )
             };
-            let fonts = [font(false), font(true)];
+            // Freed on every way out, an early return included.
+            let gdi = Gdi { dc, fonts: [font(false), font(true)], bitmap: None };
+            let fonts = gdi.fonts;
             // Measure: each line wrapped to the text width.
             let mut texts: Vec<(Vec<u16>, bool, i32)> = Vec::new();
             let mut total_h = 0;
@@ -386,7 +427,8 @@ impl CaptionWindow {
             };
             let mut bits = std::ptr::null_mut();
             let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let old_bitmap = SelectObject(dc, bitmap.into());
+            let mut gdi = gdi;
+            gdi.bitmap = Some((bitmap, SelectObject(dc, bitmap.into())));
             let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
             pixels.fill(0);
             // White text on black: a pixel's green is the text's coverage.
@@ -431,16 +473,37 @@ impl CaptionWindow {
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
             let updated = UpdateLayeredWindow(self.hwnd, None, None, Some(&size), Some(dc), Some(&origin), COLORREF(0), Some(&blend), ULW_ALPHA);
-            SelectObject(dc, old_bitmap);
-            let _ = DeleteObject(bitmap.into());
-            for f in fonts {
-                let _ = DeleteObject(f.into());
-            }
-            let _ = DeleteDC(dc);
+            std::mem::drop(gdi);
             updated?;
             let _ = ShowWindow(self.hwnd, SW_SHOWNA);
         }
         Ok(())
+    }
+}
+
+/// A caption's GDI objects: its memory DC, its two fonts and the bitmap
+/// selected into the DC (with what it replaced), freed when dropped.
+struct Gdi {
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    fonts: [windows::Win32::Graphics::Gdi::HFONT; 2],
+    bitmap: Option<(windows::Win32::Graphics::Gdi::HBITMAP, windows::Win32::Graphics::Gdi::HGDIOBJ)>,
+}
+
+impl Drop for Gdi {
+    fn drop(&mut self) {
+        use windows::Win32::Graphics::Gdi::{DeleteDC, DeleteObject, SelectObject};
+        // SAFETY: objects made by `CaptionWindow::draw` on this thread and
+        // used by nothing else now.
+        unsafe {
+            if let Some((bitmap, old)) = self.bitmap.take() {
+                SelectObject(self.dc, old);
+                let _ = DeleteObject(bitmap.into());
+            }
+            for font in self.fonts {
+                let _ = DeleteObject(font.into());
+            }
+            let _ = DeleteDC(self.dc);
+        }
     }
 }
 

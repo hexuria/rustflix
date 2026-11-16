@@ -66,6 +66,8 @@ pub(crate) struct Video {
     /// be made (the picture then stays GPUI's while a caption shows).
     captions: Option<Rc<RefCell<direct::CaptionWindow>>>,
     captions_failed: bool,
+    /// The picture's window failed: not tried again before this.
+    direct_retry: Option<std::time::Instant>,
 }
 
 impl Video {
@@ -91,6 +93,7 @@ impl Video {
             hide_pending: false,
             captions: None,
             captions_failed: false,
+            direct_retry: None,
         }
     }
 
@@ -165,6 +168,9 @@ impl Video {
         }
     }
 }
+
+/// How long the picture stays in the app's drawing after its window failed.
+const DIRECT_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn num(v: Option<&JsonValue>, key: &str) -> f32 {
     v.and_then(|v| v.get(key)).and_then(JsonValue::as_f64).filter(|n| n.is_finite()).unwrap_or(0.0) as f32
@@ -243,7 +249,12 @@ impl Element for FrameElement {
                 let device = |v: Pixels| (f32::from(v) * scale).round() as i32;
                 let (x, y) = (device(at.origin.x), device(at.origin.y));
                 let (r, b) = (device(at.origin.x + at.size.width), device(at.origin.y + at.size.height));
-                child.borrow_mut().place((x, y, r - x, b - y));
+                if child.borrow_mut().place((x, y, r - x, b - y)) {
+                    // It went to the top: the caption goes back over it.
+                    if let Some((captions, _)) = &self.caption {
+                        captions.borrow().raise();
+                    }
+                }
             }
         }
         if let Some((captions, caption)) = self.caption.take() {
@@ -305,6 +316,14 @@ impl NativeComponent for Video {
         // Outside GPUI while nothing is drawn over the picture, where GPUI
         // draws on the CPU; a cropped picture (cover) stays GPUI's.
         let mut want = self.player.uncovered() && matches!(fit, ObjectFit::Contain) && direct::allowed(direct::software());
+        // A frame that could not go to the window: the worker already sends
+        // frames to GPUI; the window comes down, and is tried again later.
+        if self.player.take_direct_failed() {
+            self.direct_retry = Some(std::time::Instant::now() + DIRECT_RETRY);
+        }
+        if self.direct_retry.is_some_and(|at| std::time::Instant::now() < at) {
+            want = false;
+        }
         // A caption shows over the picture's window in a window of its own.
         let caption = self.player.caption();
         let captions = if want && caption.is_some() { self.captions_window() } else { self.captions.clone() };

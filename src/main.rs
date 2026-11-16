@@ -289,6 +289,11 @@ mod cache {
             if webkit::remove(&paths.app_id, what == What::Site) {
                 return before.saturating_sub(dir_size(dir));
             }
+            // A store the web engine has open is not deleted under it.
+            if webkit::in_use(dir) {
+                log::warn!("cache: {} is in use and the web engine did not clear it; left as it is", dir.display());
+                return 0;
+            }
         }
         clear_dir(dir)
     }
@@ -396,6 +401,11 @@ mod cache {
                 }
             }
         }
+
+        /// Unchanged on macOS: the walk deletes what WebKit left.
+        pub(super) fn in_use(_dir: &std::path::Path) -> bool {
+            false
+        }
     }
 
     /// Windows: the live WebView2 profile (`ClearBrowsingData`).
@@ -409,11 +419,20 @@ mod cache {
             }
             ok
         }
+
+        /// Whether a WebView2 browser has the profile holding `dir` open.
+        pub(super) fn in_use(dir: &std::path::Path) -> bool {
+            crate::win::webview::profile_in_use(dir)
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     mod webkit {
         pub(super) fn remove(_app_id: &str, _all: bool) -> bool {
+            false
+        }
+
+        pub(super) fn in_use(_dir: &std::path::Path) -> bool {
             false
         }
     }

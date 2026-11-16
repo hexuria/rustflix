@@ -217,6 +217,8 @@ struct View {
     resolver: bool,
     /// The id of the guard script this view got, and the script's hash.
     script: Option<(String, u64)>,
+    /// The hash of a guard script being added (its id not known yet).
+    adding: Option<u64>,
     /// A main-frame navigation the guard let start, until its content loads
     /// (its redirects may leave the site).
     pending: Option<Instant>,
@@ -411,6 +413,7 @@ fn hook(started: Instant) {
         Ok(Ok(env)) => env,
         other => {
             log::warn!("webview: WebView2 environment failed ({other:?}); web views stay unguarded");
+            let _ = std::fs::remove_dir_all(&folder);
             return;
         }
     };
@@ -428,6 +431,13 @@ fn hook(started: Instant) {
                 ORIGINAL_WITH_OPTIONS.store(prev, Ordering::SeqCst);
             }
         }
+    }
+    // The probe's profile: the vtables are patched, it is not used again.
+    drop(env);
+    if let Err(e) = std::fs::remove_dir_all(&folder)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::debug!("webview: probe folder {} not removed: {e}", folder.display());
     }
     log::info!(
         "webview: WebView2 controller creation hooked in {} ms (with options: {}, base: {})",
@@ -447,7 +457,7 @@ fn adopt(controller: &ICoreWebView2Controller, env: &ICoreWebView2Environment) {
     let k = key(&webview);
     GUARD.with_borrow_mut(|g| {
         prune(g);
-        g.views.insert(k, View { controller: controller.clone(), webview: webview.clone(), resolver: false, script: None, pending: None });
+        g.views.insert(k, View { controller: controller.clone(), webview: webview.clone(), resolver: false, script: None, adding: None, pending: None });
     });
     let mut token = 0i64;
     // SAFETY: as above; handlers hold no reference to the web view (no cycle).
@@ -604,40 +614,56 @@ fn adopt(controller: &ICoreWebView2Controller, env: &ICoreWebView2Environment) {
 }
 
 /// Gives view `k` the current guard script (at document creation, every
-/// frame) unless it has this exact one; the previous one is removed.
+/// frame) unless it has this exact one or is being given it. The id comes
+/// later, in the completion: the script it replaces, or one that is no
+/// longer current by then, is removed there.
 fn give_script(k: usize) {
-    let (webview, src, old) = GUARD.with_borrow(|g| {
-        let v = g.views.get(&k);
-        (v.map(|v| v.webview.clone()), g.script.clone(), v.and_then(|v| v.script.clone()))
-    });
-    let Some(webview) = webview else { return };
-    if src.is_empty() {
+    let Some((webview, src, hash)) = GUARD.with_borrow_mut(|g| {
+        let src = g.script.clone();
+        let hash = fnv(&src);
+        let v = g.views.get_mut(&k)?;
+        if src.is_empty() || v.script.as_ref().is_some_and(|(_, h)| *h == hash) || v.adding == Some(hash) {
+            return None;
+        }
+        v.adding = Some(hash);
+        Some((v.webview.clone(), src, hash))
+    }) else {
         return;
-    }
-    let hash = fnv(&src);
-    if old.as_ref().is_some_and(|(_, h)| *h == hash) {
-        return;
-    }
+    };
     // SAFETY: main thread, live web view.
     unsafe {
-        if let Some((id, _)) = &old {
-            let _ = webview.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(id.as_str()));
-        }
         let added = webview.AddScriptToExecuteOnDocumentCreated(
             &HSTRING::from(src.as_str()),
             &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |result, id| {
-                if result.is_ok() {
-                    GUARD.with_borrow_mut(|g| {
-                        if let Some(v) = g.views.get_mut(&k) {
-                            v.script = Some((id, hash));
-                        }
-                    });
+                // What to take out: the script this replaces, or this one
+                // when another became current meanwhile.
+                let (webview, stale) = GUARD.with_borrow_mut(|g| {
+                    let current = fnv(&g.script);
+                    let Some(v) = g.views.get_mut(&k) else { return (None, None) };
+                    if v.adding == Some(hash) {
+                        v.adding = None;
+                    }
+                    if result.is_err() {
+                        return (None, None);
+                    }
+                    let stale = if hash == current { v.script.replace((id, hash)).map(|(old, _)| old) } else { Some(id) };
+                    (Some(v.webview.clone()), stale)
+                });
+                if let (Some(webview), Some(stale)) = (webview, stale) {
+                    // Main thread (the completion's), live web view: within
+                    // the outer `unsafe` block.
+                    let _ = webview.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(stale.as_str()));
                 }
                 Ok(())
             })),
         );
         if let Err(e) = added {
             log::warn!("webview: guard script not added: {e}");
+            GUARD.with_borrow_mut(|g| {
+                if let Some(v) = g.views.get_mut(&k) {
+                    v.adding = None;
+                }
+            });
         }
     }
 }
@@ -851,6 +877,27 @@ pub(crate) fn handle_background(data: Value, call: nsh_engine::HostCall) {
     });
 }
 
+/// Whether the WebView2 profile holding `dir` is open: a WebView2 browser
+/// process holds its user data folder's `lockfile` (beside `Default`)
+/// shut to others while it runs.
+pub(crate) fn profile_in_use(dir: &std::path::Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    let Some(user_data) = dir.ancestors().find(|a| a.file_name().is_some_and(|n| n.eq_ignore_ascii_case("EBWebView"))) else {
+        return false;
+    };
+    let lock = user_data.join("lockfile");
+    if !lock.is_file() {
+        return false;
+    }
+    // ERROR_SHARING_VIOLATION: the browser has it.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&lock)
+        .is_err_and(|e| e.raw_os_error() == Some(32))
+}
+
 /// `cache.clear` of web data (`all`: site data too — cookies, storage) through
 /// the live WebView2 profile the web views share, as macOS goes through
 /// `WKWebsiteDataStore`. Blocks the calling (cache) thread until WebView2
@@ -890,4 +937,32 @@ pub(crate) fn clear_browsing_data(all: bool) -> bool {
         }
     });
     rx.recv_timeout(Duration::from_secs(15)).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_in_use;
+
+    #[test]
+    fn a_profile_is_in_use_while_its_lockfile_is_held() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!("rustflix-lock-test-{}", std::process::id()));
+        let profile = root.join("WebView2").join("EBWebView").join("Default");
+        std::fs::create_dir_all(profile.join("Cache")).unwrap();
+        let lock = root.join("WebView2").join("EBWebView").join("lockfile");
+        // No lockfile: no browser has run.
+        assert!(!profile_in_use(&profile));
+        std::fs::write(&lock, b"").unwrap();
+        assert!(!profile_in_use(&profile));
+        {
+            // As the browser holds it.
+            let _held = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&lock).unwrap();
+            assert!(profile_in_use(&profile));
+            assert!(profile_in_use(&profile.join("Cache")));
+        }
+        assert!(!profile_in_use(&profile));
+        // Not in a WebView2 profile at all.
+        assert!(!profile_in_use(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

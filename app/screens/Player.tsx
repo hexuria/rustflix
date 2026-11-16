@@ -81,6 +81,7 @@ import {
   loadingArt,
   registerPlaybackHost,
   webPageUrl,
+  upNextCard,
 } from "../lib/player";
 import {
   NativeVideo,
@@ -95,7 +96,7 @@ import { cancelResolve, resolveStream, warmResolver, type ResolveRequest } from 
 import { PLAYER_SOURCES } from "../lib/sources";
 import { motionReduced, settings } from "../lib/store";
 import { Captions } from "./Captions";
-import { focusContent, restoreBrightness, webBackground } from "../lib/system";
+import { focusContent, restoreBrightness, toastsShown, webBackground } from "../lib/system";
 import { Button } from "../lib/ui";
 import { closeEpisodes, EpisodePicker, openEpisodes, showEpisodes } from "./EpisodePicker";
 import { openSources, SourcePicker } from "./SourcePicker";
@@ -182,7 +183,8 @@ function NativeStage(props: { mobile: boolean }) {
   // nothing is, on a machine without a GPU, the player shows the picture
   // in a child window above the app's drawing (src/player/win/direct.rs).
   // Anything but plain playback counts as covered; captions do not (the
-  // player draws them over that window itself).
+  // player draws them over that window itself). The Up Next card and
+  // toasts show with the controls hidden, so they are named here too.
   const covered = computed(() => {
     if (platform.os !== "windows") return true;
     return (
@@ -193,7 +195,9 @@ function NativeStage(props: { mobile: boolean }) {
       skipPill() !== null ||
       showPalette() ||
       showSources() ||
-      showEpisodes()
+      showEpisodes() ||
+      upNextCard() !== null ||
+      toastsShown()
     );
   });
   if (platform.os === "windows") {

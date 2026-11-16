@@ -90,6 +90,9 @@ struct Shared {
     uncovered: bool,
     /// `sys.nativeVideo {caption}`: the caption the app shows now.
     caption: Option<super::direct::Caption>,
+    /// A frame could not go to the child window: the worker sends frames to
+    /// GPUI again, and the component is to take the window down.
+    direct_failed: bool,
 }
 
 /// Work for the player's thread.
@@ -353,6 +356,11 @@ impl Player {
         self.shared.lock().map(|s| s.picture).unwrap_or_default()
     }
 
+    /// Whether a frame failed to go to the child window since last asked.
+    pub(crate) fn take_direct_failed(&self) -> bool {
+        self.shared.lock().map(|mut s| std::mem::take(&mut s.direct_failed)).unwrap_or(false)
+    }
+
     /// The newest frame for the component to paint.
     pub(crate) fn frame(&self) -> Option<Arc<FrameData>> {
         self.shared.lock().ok()?.latest.clone()
@@ -530,11 +538,11 @@ struct Worker {
     /// Frames through the CPU (`super::wic`) for the current engine, where
     /// there is no GPU; `None`: through `target` on the device.
     cpu: Option<super::wic::CpuTarget>,
-    /// The picture outside GPUI (`super::direct`): the swap chain, whether
-    /// frames go there now, and the last frame shown there.
+    /// The picture outside GPUI (`super::direct`): the swap chain, and
+    /// whether frames go there now. The newest frame is GPUI's `latest`
+    /// either way, so that the picture is current when it comes back.
     presenter: super::direct::Presenter,
     direct_live: bool,
-    last_direct: Option<((u32, u32), Vec<u8>)>,
     media: Option<Media>,
     target: Option<Target>,
     /// Bumped for every new engine; callbacks of an older one are dropped.
@@ -569,8 +577,8 @@ struct Worker {
     subs: Vec<Track>,
     /// The timed-text track whose cues are shown (None: subtitles off).
     sel_text: Option<u32>,
-    /// The cue on screen: its track and end.
-    cue: Option<(u32, f64)>,
+    /// The cue on screen: its track, start and end.
+    cue: Option<(u32, f64, f64)>,
 }
 
 impl Worker {
@@ -585,7 +593,6 @@ impl Worker {
             cpu: None,
             presenter: super::direct::Presenter::default(),
             direct_live: false,
-            last_direct: None,
             media: None,
             target: None,
             generation: 0,
@@ -760,7 +767,6 @@ impl Worker {
         self.target = None;
         self.presenter.release();
         self.direct_live = false;
-        self.last_direct = None;
         self.shared.lock().unwrap().latest = None;
         self.metadata = false;
         self.loaded = false;
@@ -1131,9 +1137,9 @@ impl Worker {
             return;
         }
         if on {
-            self.cue = Some((track, end));
+            self.cue = Some((track, start, end));
             (self.emit)("cues", json!({ "time": start, "lines": lines }));
-        } else if self.cue.is_some_and(|(t, e)| t == track && (e - end).abs() < 0.01) {
+        } else if self.cue.is_some_and(|(t, _, e)| t == track && (e - end).abs() < 0.01) {
             self.cue = None;
             (self.emit)("cues", json!({ "time": now, "lines": [] }));
         }
@@ -1318,7 +1324,7 @@ impl Worker {
                     if let Some(bytes) = fd.image.as_bytes(0) {
                         match self.presenter.present(hwnd, size, bytes) {
                             Ok(()) => self.direct_live = true,
-                            Err(e) => log::debug!("player {}: direct present failed: {e}", self.id),
+                            Err(e) => self.direct_failed(&e),
                         }
                     }
                 }
@@ -1326,12 +1332,21 @@ impl Worker {
             None => {
                 self.presenter.reset();
                 self.direct_live = false;
-                if let Some((size, bgra)) = self.last_direct.take() {
-                    self.to_gpui(size, bgra);
-                }
             }
         }
         (self.redraw)();
+    }
+
+    /// A frame did not go to the child window: frames go to GPUI until
+    /// the component asks again, and it is told to take the window down.
+    fn direct_failed(&mut self, e: &windows_core::Error) {
+        log::warn!("player {}: the picture's window failed ({e}); back to the app's drawing", self.id);
+        self.presenter.release();
+        self.direct_live = false;
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.direct_on = false;
+            shared.direct_failed = true;
+        }
     }
 
     /// A frame as the image GPUI paints.
@@ -1357,10 +1372,7 @@ impl Worker {
         if let Some(hwnd) = self.direct_target() {
             match self.presenter.present(hwnd, (w, h), &bgra) {
                 Ok(()) => direct = true,
-                Err(e) => {
-                    log::debug!("player {}: direct present failed: {e}", self.id);
-                    self.presenter.release();
-                }
+                Err(e) => self.direct_failed(&e),
             }
         }
         // The component places the window when the picture's size is new.
@@ -1368,11 +1380,9 @@ impl Worker {
         self.direct_live = direct;
         if direct {
             PAINTED.fetch_add(1, Ordering::Relaxed);
-            self.last_direct = Some(((w, h), bgra));
-        } else {
-            self.last_direct = None;
-            self.to_gpui((w, h), bgra);
         }
+        // GPUI's frame too (no copy): current when the picture comes back.
+        self.to_gpui((w, h), bgra);
         self.frames += 1;
         if self.frames == 1 {
             let ms = self.started.elapsed().as_millis() as u64;
@@ -1458,8 +1468,8 @@ impl Worker {
             self.ended_now();
         }
 
-        // A cue whose INACTIVE never came (a seek away from it).
-        if self.cue.is_some_and(|(_, end)| self.position > end + 0.5 || self.position + 0.5 < end - 3600.0) {
+        // A cue whose INACTIVE never came (a seek away from it, either way).
+        if self.cue.is_some_and(|(_, start, end)| cue_left(start, end, self.position)) {
             self.cue = None;
             (self.emit)("cues", json!({ "time": self.position, "lines": [] }));
         }
@@ -1485,6 +1495,12 @@ impl Worker {
             }),
         );
     }
+}
+
+/// Whether playback at `position` has left the cue `start`..`end`, either
+/// way, by more than half a second.
+fn cue_left(start: f64, end: f64, position: f64) -> bool {
+    position > end + 0.5 || position + 0.5 < start
 }
 
 fn finite(v: f64) -> Option<f64> {
@@ -1564,5 +1580,24 @@ fn make_target(device: &ID3D11Device, (w, h): (u32, u32)) -> windows_core::Resul
     match (texture, staging) {
         (Some(texture), Some(staging)) => Ok(Target { size: (w, h), texture, staging }),
         _ => Err(MF_E_UNEXPECTED.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cue_left;
+
+    #[test]
+    fn a_cue_is_left_by_a_seek_either_way() {
+        // On screen 600..604 s.
+        assert!(!cue_left(600.0, 604.0, 600.0));
+        assert!(!cue_left(600.0, 604.0, 604.4));
+        assert!(!cue_left(600.0, 604.0, 599.6));
+        // Played past, or a seek forward.
+        assert!(cue_left(600.0, 604.0, 604.6));
+        assert!(cue_left(600.0, 604.0, 900.0));
+        // A seek back, of minutes as of an hour.
+        assert!(cue_left(600.0, 604.0, 300.0));
+        assert!(cue_left(4000.0, 4004.0, 10.0));
     }
 }

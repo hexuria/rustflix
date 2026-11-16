@@ -6,7 +6,7 @@ import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { createNavStack, Dialog, NavPage, NavStack, Toast, ToastManager, ToastStack } from "nsh/base";
 import { BackHandler, TabBar } from "nsh/mobile";
 import { currentKey, hasKey, loadKey } from "./lib/tmdb";
-import { setNavButtonsHidden, setPlayerWindow } from "./lib/system";
+import { setNavButtonsHidden, setPlayerWindow, toastsShown } from "./lib/system";
 import {
   canGoBack,
   canGoForward,
@@ -264,7 +264,9 @@ let toastTimer: ReturnType<typeof setInterval> | undefined;
 let toastCount = 0;
 
 function syncToasts() {
-  shownToasts.set(toasts.visible(3) as ToastItem[]);
+  const shown = toasts.visible(3) as ToastItem[];
+  shownToasts.set(shown);
+  toastsShown.set(shown.length > 0);
 }
 
 function tickToasts() {

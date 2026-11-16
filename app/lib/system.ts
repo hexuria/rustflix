@@ -176,3 +176,9 @@ export function setPlayerWindow(on: boolean, pageTouches = false): void {
   if (!on && untracked(playerFullscreen)) queueMicrotask(() => playerFullscreen.set(false));
   void host.call("sys.playerWindow", { on, pageTouches, fullscreen }).catch(() => {});
 }
+
+/** Whether a toast is on screen (App.tsx's toast layer). Windows: the
+ * player counts it as drawn over the picture, which on a machine without
+ * a GPU is otherwise in a window above the app's own drawing
+ * (src/player/win/direct.rs). */
+export const toastsShown = signal(false);

@@ -15,7 +15,7 @@
 //! The picture's size on screen, in pixels, is the player's default decode
 //! cap: it is sent whenever the `frame` rect or the window's scale changes.
 
-use std::{panic::AssertUnwindSafe, sync::Arc};
+use std::{cell::RefCell, panic::AssertUnwindSafe, rc::Rc, sync::Arc};
 
 use nsh_platform_gpui::{
     ComponentContext, NativeComponent,
@@ -28,7 +28,7 @@ use nsh_platform_gpui::{
 use serde_json::{Value as JsonValue, json};
 
 use super::{
-    Fit,
+    Fit, direct,
     mf::{self, FrameData},
 };
 
@@ -56,6 +56,12 @@ pub(crate) struct Video {
     /// The image the last painted element replaced: dropped from the
     /// atlas on the next paint.
     retired: Option<Arc<gpui::RenderImage>>,
+    /// The child window the picture goes to while nothing is over it
+    /// (`super::direct`), whether it is in use, and a hide put off by one
+    /// frame so that GPUI's picture is on screen first.
+    direct: Option<Rc<RefCell<direct::Window>>>,
+    direct_on: bool,
+    hide_pending: bool,
 }
 
 impl Video {
@@ -69,7 +75,17 @@ impl Video {
         // Its handle, for `sys.nativeVideo` (props wait for a frame of the
         // window; that op does not).
         cx.emit("ready", json!({ "handle": player.handle() }));
-        Video { cx, player, frame: FrameRect::default(), sent_size: None, shown: None, retired: None }
+        Video {
+            cx,
+            player,
+            frame: FrameRect::default(),
+            sent_size: None,
+            shown: None,
+            retired: None,
+            direct: None,
+            direct_on: false,
+            hide_pending: false,
+        }
     }
 
     /// Runs `f`; a panic becomes an `error` event.
@@ -89,6 +105,43 @@ impl Video {
         }
         Some(fd.image.clone())
     }
+
+    /// Switches the picture between GPUI and the child window as `want`.
+    fn set_direct(&mut self, want: bool) {
+        let mut want = want;
+        if want && self.direct.is_none() {
+            match crate::win::shell::app_window().map(direct::Window::new) {
+                Some(Ok(window)) => self.direct = Some(Rc::new(RefCell::new(window))),
+                Some(Err(e)) => {
+                    log::debug!("player: no window for the picture: {e}");
+                    want = false;
+                }
+                None => want = false,
+            }
+        }
+        if want == self.direct_on {
+            return;
+        }
+        log::debug!("player: picture {}", if want { "in its own window" } else { "in the app's drawing" });
+        self.direct_on = want;
+        self.hide_pending = false;
+        let hwnd = self.direct.as_ref().map_or(0, |w| w.borrow().handle());
+        self.player.set_direct(want, hwnd);
+    }
+
+    /// Hides the child window once GPUI's picture has had a frame.
+    fn hide_direct(&mut self, painted: bool) {
+        let Some(window) = self.direct.as_ref() else { return };
+        if !window.borrow().visible() {
+            self.hide_pending = false;
+        } else if !painted || self.hide_pending {
+            window.borrow().hide();
+            self.hide_pending = false;
+        } else {
+            self.hide_pending = true;
+            self.cx.redraw();
+        }
+    }
 }
 
 fn num(v: Option<&JsonValue>, key: &str) -> f32 {
@@ -99,7 +152,10 @@ fn num(v: Option<&JsonValue>, key: &str) -> f32 {
 /// element does for CVPixelBuffers on macOS. `drop` is the image this one
 /// replaced: removed from the atlas during this paint.
 struct FrameElement {
-    image: Arc<gpui::RenderImage>,
+    /// `None` while the picture is in the child window `place`.
+    image: Option<Arc<gpui::RenderImage>>,
+    /// The child window to put where the picture goes, and the picture's size.
+    place: Option<(Rc<RefCell<direct::Window>>, (u32, u32))>,
     drop: Option<Arc<gpui::RenderImage>>,
     object_fit: ObjectFit,
     style: StyleRefinement,
@@ -155,11 +211,23 @@ impl Element for FrameElement {
             // drawn: safe to free the atlas tile now.
             let _ = window.drop_image(old);
         }
-        if self.image.frame_count() == 0 {
+        if let Some((child, (w, h))) = self.place.take() {
+            if w > 0 && h > 0 {
+                let size = gpui::size(gpui::DevicePixels(w as i32), gpui::DevicePixels(h as i32));
+                let at = self.object_fit.get_bounds(bounds, size);
+                let scale = window.scale_factor();
+                let device = |v: Pixels| (f32::from(v) * scale).round() as i32;
+                let (x, y) = (device(at.origin.x), device(at.origin.y));
+                let (r, b) = (device(at.origin.x + at.size.width), device(at.origin.y + at.size.height));
+                child.borrow_mut().place((x, y, r - x, b - y));
+            }
+        }
+        let Some(image) = self.image.clone() else { return };
+        if image.frame_count() == 0 {
             return;
         }
-        let image_bounds = self.object_fit.get_bounds(bounds, self.image.size(0));
-        let _ = window.paint_image(bounds, image_bounds, Corners::default(), self.image.clone(), 0, false);
+        let image_bounds = self.object_fit.get_bounds(bounds, image.size(0));
+        let _ = window.paint_image(bounds, image_bounds, Corners::default(), image, 0, false);
         mf::PAINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -182,6 +250,8 @@ impl NativeComponent for Video {
     fn render(&mut self, window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
         let f = self.frame;
         if f.w <= 0.0 || f.h <= 0.0 {
+            self.set_direct(false);
+            self.hide_direct(false);
             return None;
         }
         // The decode cap: the picture's size in pixels at this window's scale.
@@ -191,15 +261,26 @@ impl NativeComponent for Video {
             self.sent_size = size;
             self.player.set_display_size(size);
         }
-        let image = self.shown_image()?;
         let fit = match self.player.fit() {
             Fit::Contain => ObjectFit::Contain,
             Fit::Cover => ObjectFit::Cover,
         };
+        // Outside GPUI while nothing is drawn over the picture, where GPUI
+        // draws on the CPU; a cropped picture (cover) stays GPUI's.
+        let want = self.player.uncovered() && matches!(fit, ObjectFit::Contain) && direct::allowed(direct::software());
+        self.set_direct(want);
+        let (image, place) = if self.direct_on {
+            let place = self.direct.clone().map(|w| (w, self.player.picture_size()));
+            (None, place)
+        } else {
+            let image = self.shown_image();
+            self.hide_direct(image.is_some());
+            (Some(image?), None)
+        };
         // The element itself carries the frame rect: a child with default
         // style would lay out 0x0 and paint nothing.
         Some(
-            FrameElement { image, drop: self.retired.take(), object_fit: fit, style: StyleRefinement::default() }
+            FrameElement { image, place, drop: self.retired.take(), object_fit: fit, style: StyleRefinement::default() }
                 .absolute()
                 .left(px(f.x))
                 .top(px(f.y))

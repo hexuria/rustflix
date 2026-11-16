@@ -54,6 +54,8 @@ import {
   pipSupported,
   enterPip,
   playerPhase,
+  skipPill,
+  skipSegment,
   localPreparing,
   position,
   duration,
@@ -86,12 +88,13 @@ import {
   nativeRateProp,
   nativeView,
   setNativeFrame,
+  setNativeUncovered,
   setNativeNowPlaying,
 } from "../lib/playback/nativeBackend";
 import { cancelResolve, resolveStream, warmResolver, type ResolveRequest } from "../lib/resolver";
 import { PLAYER_SOURCES } from "../lib/sources";
 import { motionReduced, settings } from "../lib/store";
-import { Captions } from "./Captions";
+import { Captions, captionShown } from "./Captions";
 import { focusContent, restoreBrightness, webBackground } from "../lib/system";
 import { Button } from "../lib/ui";
 import { closeEpisodes, EpisodePicker, openEpisodes, showEpisodes } from "./EpisodePicker";
@@ -111,6 +114,7 @@ import {
   fmtTime,
   Glyph,
   hasNext,
+  controlsVisible,
   hideControls,
   isSeries,
   PhoneControls,
@@ -174,6 +178,31 @@ function NativeStage(props: { mobile: boolean }) {
     const np = nowPlaying();
     untracked(() => setNativeNowPlaying(np));
   });
+  // Windows only: whether anything is drawn over the picture. While
+  // nothing is, on a machine without a GPU, the player shows the picture
+  // in a child window above the app's drawing (src/player/win/direct.rs).
+  // Anything but plain playback counts as covered.
+  const covered = computed(() => {
+    if (platform.os !== "windows") return true;
+    return (
+      playerPhase() !== "playing" ||
+      controlsVisible() ||
+      playerPopup() !== null ||
+      captionShown() ||
+      skipSegment() !== null ||
+      skipPill() !== null ||
+      showPalette() ||
+      showSources() ||
+      showEpisodes()
+    );
+  });
+  if (platform.os === "windows") {
+    effect(() => {
+      const clear = !covered();
+      untracked(() => setNativeUncovered(clear));
+    });
+    cleanup(() => setNativeUncovered(false));
+  }
   return (
     <View
       class="pointer-events-none absolute inset-0"

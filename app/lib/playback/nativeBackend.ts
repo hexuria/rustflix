@@ -310,6 +310,15 @@ export function setNativeFrame(width: number, height: number): void {
   control({ frame: lastFrame });
 }
 
+/** Windows: whether nothing is drawn over the picture now (no controls,
+ * popup, captions…). On a machine without a GPU the player then shows the
+ * picture in a child window above the app's own drawing, far cheaper there
+ * (src/player/win/direct.rs). Through the handle: the desktop component's
+ * box is empty, so its props wait for a drawn frame. */
+export function setNativeUncovered(on: boolean): void {
+  control({ uncovered: on });
+}
+
 let lastNowPlaying: { title: string; subtitle?: string; artwork?: string } | null = null;
 /** Lock screen / Now Playing / media keys info (iOS, macOS), also through
  * the handle so it is current before a frame is drawn. */

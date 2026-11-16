@@ -200,7 +200,7 @@ pub(crate) fn reveal(path: &Path) -> bool {
 
 /// The app's top-level GPUI window (owned by the main thread), if any.
 /// Call on the main thread.
-fn app_window() -> Option<windows::Win32::Foundation::HWND> {
+pub(crate) fn app_window() -> Option<windows::Win32::Foundation::HWND> {
     use windows::Win32::{
         Foundation::{HWND, LPARAM},
         System::Threading::GetCurrentThreadId,

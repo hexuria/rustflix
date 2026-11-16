@@ -739,5 +739,21 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   drawing (within 2/255: image sampling rounds differently after a move).
   Needs a design upstream (scroll hints from NSH, translation-invariant
   sprite sampling) before it can ship.
+- **Video outside GPUI's frame** (`src/player/win/direct.rs`, software
+  adapters only; `RUSTFLIX_DIRECT_VIDEO=1/0` forces it). Profiling showed the
+  picture drawn through GPUI costs ~50–60 points of CPU on WARP whatever
+  the shader (fast path, no blending, no clip planes: no gain), while a
+  flip-model swap chain of the video's own size in a child window,
+  stretched by the compositor, costs ~0 % in the app and ~14 % in dwm
+  (standalone probe, 640×360 → 1440×810 at 30 fps). While the app says
+  nothing is drawn over the picture (`sys.nativeVideo {uncovered}`: playing,
+  no controls, popup, caption, skip button or dialog), frames go to that
+  child window and GPUI draws nothing; the moment something must be over
+  the picture, the frame on screen goes back to GPUI and the window hides.
+  The mouse passes through the window. Measured on the 848×480 HLS
+  download: every decoded frame shown (53 of 53 per second; 16–25 before),
+  app CPU ~135–160 % → ~60 % (+ dwm ~40 % at that frame rate).
+  Limits: captions and controls put the picture back on the GPUI path while
+  they show; a cropped picture (`fit: cover`) stays on it.
 - On any machine with a GPU none of this is visible: the app's own work per
   frame is ~1.5 ms.

@@ -104,6 +104,8 @@ export async function controlVideo(
      * the `frame` prop arrives with a drawn frame). */
     frame?: { width: number; height: number };
     nowPlaying?: { title: string; subtitle?: string; artwork?: string } | null;
+    /** Windows: nothing is drawn over the picture (see setNativeUncovered). */
+    uncovered?: boolean;
   },
 ): Promise<boolean> {
   return !!(await call<{ ok: boolean }>("sys.nativeVideo", { handle, ...data }))?.ok;

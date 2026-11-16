@@ -1904,8 +1904,18 @@ function PointerLine(props: {
 }
 
 let lastPoke = 0;
-/** Mouse movement over the picture: at most a poke every 250 ms. */
-function pokeFromMouse() {
+let lastMouse: { x: number; y: number } | null = null;
+/** Mouse movement over the picture: at most a poke every 250 ms. A move
+ * event at the place of the last one is not the user: Windows sends one
+ * whenever a window appears or goes under the pointer (the picture's own
+ * window there, src/player/win/direct.rs), and the controls it would bring
+ * back would hide that window again. */
+function pokeFromMouse(e?: { position?: { x: number; y: number } }) {
+  const p = e?.position;
+  if (p) {
+    if (lastMouse && lastMouse.x === p.x && lastMouse.y === p.y) return;
+    lastMouse = { x: p.x, y: p.y };
+  }
   const now = Date.now();
   if (controlsVisible() && now - lastPoke < 250) return;
   lastPoke = now;

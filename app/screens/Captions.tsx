@@ -53,6 +53,10 @@ function segments(line: string, startItalic: boolean): { text: string; italic: b
   return out;
 }
 
+/** Whether a caption is on screen now (Windows: the picture then stays
+ * under the app's drawing, see NativeVideo's `overlay`). */
+export const captionShown = signal(false);
+
 export function Captions(props: { mobile: boolean; size: () => { w: number; h: number } }) {
   // The player's time, carried forward between reports.
   let basePos = 0;
@@ -126,6 +130,12 @@ export function Captions(props: { mobile: boolean; size: () => { w: number; h: n
     lastLines = out;
     return out;
   });
+
+  effect(() => {
+    const on = lines().length > 0;
+    untracked(() => captionShown.set(on));
+  });
+  cleanup(() => captionShown.set(false));
 
   return (
     <If when={lines().length > 0}>

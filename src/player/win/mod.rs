@@ -19,6 +19,7 @@
 //!   paints), not the HLS rendition Media Foundation picks by bandwidth.
 
 pub(crate) mod component;
+mod direct;
 mod mf;
 mod wic;
 

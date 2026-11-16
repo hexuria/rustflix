@@ -81,6 +81,13 @@ pub(crate) struct FrameData {
 struct Shared {
     latest: Option<Arc<FrameData>>,
     fit: Fit,
+    /// The child window the picture goes to while `direct_on`
+    /// (`super::direct`; 0: none), and the last frame's size.
+    direct_hwnd: isize,
+    direct_on: bool,
+    picture: (u32, u32),
+    /// `sys.nativeVideo {uncovered}`: nothing is drawn over the picture.
+    uncovered: bool,
 }
 
 /// Work for the player's thread.
@@ -96,6 +103,8 @@ enum Msg {
     Display(Option<(f64, f64)>),
     Seek(f64),
     Select { legible: bool, id: Option<String> },
+    /// The picture's destination changed (`Shared::direct_on`).
+    Direct,
     /// `IMFMediaEngineNotify::EventNotify` for the engine of generation `gen`.
     Event { generation: u64, event: u32, param1: usize, param2: u32 },
     /// The timed-text track list changed.
@@ -144,6 +153,12 @@ pub(crate) fn control(handle: u64, data: &Value) -> bool {
     }
     if let Some(v) = data.get("maxResolution") {
         send(Msg::MaxRes(size_of(Some(v))));
+    }
+    if let Some(v) = data.get("uncovered").and_then(Value::as_bool) {
+        if let Some(shared) = e.shared.upgrade() {
+            shared.lock().unwrap().uncovered = v;
+        }
+        (e.redraw)();
     }
     if let Some(f) = data.get("frame") {
         // Points; the component sends the size in pixels once it draws.
@@ -292,6 +307,26 @@ impl Player {
     /// `selectAudio` / `selectSubtitle` (`None`: subtitles off).
     pub(crate) fn select(&self, legible: bool, id: Option<&str>) {
         self.send(Msg::Select { legible, id: id.map(str::to_owned) });
+    }
+
+    /// Sends the picture to the child window `hwnd` (`super::direct`)
+    /// instead of GPUI, or back.
+    pub(crate) fn set_direct(&self, on: bool, hwnd: isize) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.direct_on = on;
+            shared.direct_hwnd = hwnd;
+        }
+        self.send(Msg::Direct);
+    }
+
+    /// Whether the app says nothing is drawn over the picture.
+    pub(crate) fn uncovered(&self) -> bool {
+        self.shared.lock().map(|s| s.uncovered).unwrap_or(false)
+    }
+
+    /// The size of the last frame made, in pixels.
+    pub(crate) fn picture_size(&self) -> (u32, u32) {
+        self.shared.lock().map(|s| s.picture).unwrap_or_default()
     }
 
     /// The newest frame for the component to paint.
@@ -471,6 +506,11 @@ struct Worker {
     /// Frames through the CPU (`super::wic`) for the current engine, where
     /// there is no GPU; `None`: through `target` on the device.
     cpu: Option<super::wic::CpuTarget>,
+    /// The picture outside GPUI (`super::direct`): the swap chain, whether
+    /// frames go there now, and the last frame shown there.
+    presenter: super::direct::Presenter,
+    direct_live: bool,
+    last_direct: Option<((u32, u32), Vec<u8>)>,
     media: Option<Media>,
     target: Option<Target>,
     /// Bumped for every new engine; callbacks of an older one are dropped.
@@ -519,6 +559,9 @@ impl Worker {
             tx,
             device: None,
             cpu: None,
+            presenter: super::direct::Presenter::default(),
+            direct_live: false,
+            last_direct: None,
             media: None,
             target: None,
             generation: 0,
@@ -651,6 +694,7 @@ impl Worker {
             }
             Msg::Seek(t) => self.seek(t),
             Msg::Select { legible, id } => self.select(legible, id.as_deref()),
+            Msg::Direct => self.direct_changed(),
             Msg::Event { generation, event, param1, param2 } => {
                 if generation == self.generation {
                     self.on_event(event, param1, param2);
@@ -690,6 +734,9 @@ impl Worker {
             let _ = unsafe { m.engine.Shutdown() };
         }
         self.target = None;
+        self.presenter.release();
+        self.direct_live = false;
+        self.last_direct = None;
         self.shared.lock().unwrap().latest = None;
         self.metadata = false;
         self.loaded = false;
@@ -1229,7 +1276,42 @@ impl Worker {
         }
     }
 
-    fn publish(&mut self, (w, h): (u32, u32), bgra: Vec<u8>) {
+    /// Where frames go now: the child window, if the component asked.
+    fn direct_target(&self) -> Option<isize> {
+        let shared = self.shared.lock().ok()?;
+        (shared.direct_on && shared.direct_hwnd != 0).then_some(shared.direct_hwnd)
+    }
+
+    /// The component switched the picture between GPUI and the child
+    /// window: the picture on screen goes over with it, playing or not.
+    fn direct_changed(&mut self) {
+        match self.direct_target() {
+            Some(hwnd) => {
+                let latest = self.shared.lock().ok().and_then(|s| s.latest.clone());
+                if let Some(fd) = latest {
+                    let size = fd.image.size(0);
+                    let size = (size.width.0 as u32, size.height.0 as u32);
+                    if let Some(bytes) = fd.image.as_bytes(0) {
+                        match self.presenter.present(hwnd, size, bytes) {
+                            Ok(()) => self.direct_live = true,
+                            Err(e) => log::debug!("player {}: direct present failed: {e}", self.id),
+                        }
+                    }
+                }
+            }
+            None => {
+                self.presenter.reset();
+                self.direct_live = false;
+                if let Some((size, bgra)) = self.last_direct.take() {
+                    self.to_gpui(size, bgra);
+                }
+            }
+        }
+        (self.redraw)();
+    }
+
+    /// A frame as the image GPUI paints.
+    fn to_gpui(&mut self, (w, h): (u32, u32), bgra: Vec<u8>) {
         // BGRA bytes in an Rgba-typed buffer: the atlas reads bytes, the
         // pixel type is only the container (as on Linux).
         let Some(pixels) = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(w, h, bgra) else { return };
@@ -1238,13 +1320,44 @@ impl Worker {
             image: Arc::new(RenderImage::new(SmallVec::from_elem(Frame::new(pixels), 1))),
         });
         self.shared.lock().unwrap().latest = Some(fd);
+    }
+
+    fn publish(&mut self, (w, h): (u32, u32), bgra: Vec<u8>) {
+        let resized = {
+            let mut shared = self.shared.lock().unwrap();
+            let resized = shared.picture != (w, h);
+            shared.picture = (w, h);
+            resized
+        };
+        let mut direct = false;
+        if let Some(hwnd) = self.direct_target() {
+            match self.presenter.present(hwnd, (w, h), &bgra) {
+                Ok(()) => direct = true,
+                Err(e) => {
+                    log::debug!("player {}: direct present failed: {e}", self.id);
+                    self.presenter.release();
+                }
+            }
+        }
+        // The component places the window when the picture's size is new.
+        let redraw = !direct || !self.direct_live || resized;
+        self.direct_live = direct;
+        if direct {
+            PAINTED.fetch_add(1, Ordering::Relaxed);
+            self.last_direct = Some(((w, h), bgra));
+        } else {
+            self.last_direct = None;
+            self.to_gpui((w, h), bgra);
+        }
         self.frames += 1;
         if self.frames == 1 {
             let ms = self.started.elapsed().as_millis() as u64;
             (self.emit)("frame", json!({ "ms": ms, "width": self.native.0, "height": self.native.1 }));
             self.emit_load();
         }
-        (self.redraw)();
+        if redraw {
+            (self.redraw)();
+        }
     }
 
     fn emit_load(&mut self) {

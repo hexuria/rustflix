@@ -688,3 +688,43 @@ Verified with injected mouse input on this VM (`m7-*.png`):
   either ships, the version bump goes in `Cargo.toml`/`Cargo.lock` (nsh 0.5.x
   needs gpui-fast ≥ 0.1.13; that migration is its own change).
 - No extra DLLs: Media Foundation and WebView2 are Windows'.
+
+## Performance on a machine without a GPU (2026-11-16)
+
+Measured on the VM (Windows Server 2022, 2 vCPU, no GPU: Direct3D 11 runs on
+WARP, the CPU rasterizer), release build, after the first screen settled
+(loading Home keeps both CPUs busy for ~40 s; earlier numbers are polluted).
+
+- **Cause.** NSH paints a frame in < 1 ms and GPUI encodes it in 0.5 ms;
+  WARP then shaded ~300 ms per frame (3–5 fps while scrolling). Switching
+  primitive kinds off one at a time showed it was quads: **overdraw**, the
+  quads covered 5.7× the window per frame (window, content area, page and
+  pages kept under the one shown, each an opaque full-size background).
+  Shader complexity and clip distances were ruled out by experiment.
+- **gpui-fast: overdraw culling** (draft longbridge/gpui-fast#149; local
+  patch here). Primitives a later opaque rectangle or opaque image hides are
+  not drawn; partly covered plain quads are drawn as their uncovered pieces.
+  Pixel tests compare culled and whole drawing byte for byte.
+  Home scrolling: quads 5.7× → 1.9× the window, `Present` ~300 → ~100 ms,
+  CPU 165% → ~110%.
+- **rustflix: video frames through the CPU** (`src/player/win/wic.rs`).
+  On the Basic Render Driver the media engine converted each frame on WARP:
+  60–90 ms for a 640×360 frame (~8 fps shown). Without a DXGI manager the
+  engine decodes in software and transfers into a WIC bitmap: ~1 ms a frame.
+  `RUSTFLIX_MF_SOFTWARE=1/0` forces the path; with a GPU the Direct3D path
+  (hardware decode) stays.
+- **Video result** (same 10 s 30 fps 360p file Edge plays; Downloads → Play):
+  frames decoded 8 → 30 per second, painted ~2 → **24.7–25.7** per second
+  with the window focused (~23 unfocused: GPUI draws unfocused windows at
+  30 Hz), 10 s of media in 10 s, ~115% CPU playing, 0% paused; subtitles
+  (bipbop `t0`: "Subtitles: Bip!"), controls over the picture and the
+  web-page player checked.
+- **Next, prototyped only** (`C:\tools\perf-p3.md`, not in any repo):
+  partial redraw of scrolled frames in the renderer (copy the previous frame
+  shifted, draw only the exposed strip and what changed, scissored): Home
+  scrolling `Present` 97 → **19 ms**, CPU 102% → 17%, checked against whole
+  drawing (within 2/255: image sampling rounds differently after a move).
+  Needs a design upstream (scroll hints from NSH, translation-invariant
+  sprite sampling) before it can ship.
+- On any machine with a GPU none of this is visible: the app's own work per
+  frame is ~1.5 ms.

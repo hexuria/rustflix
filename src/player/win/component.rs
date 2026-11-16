@@ -277,14 +277,6 @@ impl Element for FrameElement {
     }
 }
 
-impl IntoElement for FrameElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Styled for FrameElement {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style

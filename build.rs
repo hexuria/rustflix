@@ -85,8 +85,10 @@ fn build(entry: &Path, out: &Path, release: bool) -> Result<(), String> {
     let bundle = nsh_bundler::bundle(&BundleOptions {
         entry: entry.to_path_buf(),
         minify: release,
+        development: !release,
         split: false,
         ui_sets: ui_sets.clone(),
+        ..Default::default()
     })
     .map_err(|e| e.plain)?;
     let code = inject_keys(&bundle.code)?;

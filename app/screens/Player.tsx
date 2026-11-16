@@ -22,7 +22,7 @@ import {
   WebView,
 } from "nsh";
 import { Dialog, Slider } from "nsh/base";
-import { isAvailable as hasWindow, Window } from "nsh/desktop";
+import { currentWindow, isAvailable as hasWindow } from "nsh/desktop";
 import { exitPlayer, route } from "../lib/router";
 import {
   closePalette,
@@ -635,6 +635,8 @@ export function Player() {
   // controls over the video itself (the core turns them on; see
   // `pageControlsActive`). The GPUI bar below is the fallback while the
   // page has no overlay; both drive playback through the JS bridge.
+  // The app's window (nsh 0.5: a `WindowRef`, taken while rendering).
+  const appWindow = hasWindow ? currentWindow() : null;
   // Page buttons that need the app arrive through onPageAction.
   const offPageAction = onPageAction((a: PageAction) => {
     if (a === "escape" && closePlayerPopups()) return;
@@ -649,7 +651,7 @@ export function Player() {
     } else if (a === "fullscreen") {
       // The page's own fullscreen failed; asking the page again would
       // fail the same way (and loop), so the app window goes fullscreen.
-      if (hasWindow) Window.toggleFullScreen();
+      if (appWindow) appWindow.setMode(appWindow.state()?.mode === "fullScreen" ? "normal" : "fullScreen");
     }
   });
   cleanup(offPageAction);

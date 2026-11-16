@@ -2,7 +2,7 @@
 // The whole UI is TSX; the GPUI host only provides the window.
 
 import { computed, effect, host, Image, mount, platform, safeAreaInsets, signal, Storage, Text, untracked, View } from "nsh";
-import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
+import { currentWindow, isAvailable as hasWindow, titleBar } from "nsh/desktop";
 import { createNavStack, Dialog, NavPage, NavStack, Toast, ToastManager, ToastStack } from "nsh/base";
 import { BackHandler, TabBar } from "nsh/mobile";
 import { currentKey, hasKey, loadKey } from "./lib/tmdb";
@@ -1032,10 +1032,12 @@ export function App() {
   // The system title bar hides; TitleBar below draws our own (the
   // traffic lights stay, in the area `titleBar()` reports). Desktop only.
   if (hasWindow) {
-    Window.setTitleBar({ style: "hidden", height: 40 });
+    // nsh 0.5: one handle per window (`WindowRef`), taken while rendering.
+    const win = currentWindow();
+    win.set({ titleBar: { style: "hidden", height: 40 } });
     // The native window title follows the route (movie name while playing).
     effect(() => {
-      Window.setTitle(playingTitle());
+      win.set({ title: playingTitle() });
     });
   }
 

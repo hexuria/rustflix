@@ -714,11 +714,17 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   `RUSTFLIX_MF_SOFTWARE=1/0` forces the path; with a GPU the Direct3D path
   (hardware decode) stays.
 - **Video result** (same 10 s 30 fps 360p file Edge plays; Downloads → Play):
-  frames decoded 8 → 30 per second, painted ~2 → **24.7–25.7** per second
-  with the window focused (~23 unfocused: GPUI draws unfocused windows at
-  30 Hz), 10 s of media in 10 s, ~115% CPU playing, 0% paused; subtitles
-  (bipbop `t0`: "Subtitles: Bip!"), controls over the picture and the
-  web-page player checked.
+  frames decoded 8 → 30 per second; painted ~2 → **23.1–25.7** per second
+  with the window focused (8 runs, median ≈ 24; ~23 unfocused, where GPUI
+  draws at 30 Hz); 10 s of media in 10 s; ~105–115% CPU playing, 0%
+  paused; subtitles (bipbop `t0`: "Subtitles: Bip!"), controls over the
+  picture and the web-page player checked.
+- **What limits video now** (measured): putting each frame into GPUI's
+  sprite atlas (`paint_image`) waits 8–21 ms for WARP to finish with the
+  atlas texture the previous frame draws from (p50 0.5 ms, p90 34 ms per
+  paint). gpui-fast 0.1.10's atlas has no path for an image that changes
+  every frame; gpui-fast main has one (`fast::dynamic_textures`), which
+  needs the move to a newer gpui-fast / nsh 0.5.
 - **Next, prototyped only** (`C:\tools\perf-p3.md`, not in any repo):
   partial redraw of scrolled frames in the renderer (copy the previous frame
   shifted, draw only the exposed strip and what changed, scissored): Home

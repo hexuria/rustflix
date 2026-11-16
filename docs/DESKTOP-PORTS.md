@@ -355,6 +355,14 @@ not tried. No audio device on this VM: sound output is unverified.
 
 ## Upstream dependency (startup crash)
 
+**Status (2026-11-16):** longbridge/nsh#2116 is **merged** but not released
+(latest nsh-platform-gpui is 0.5.1); longbridge/gpui-fast#145 is reviewed
+(all points addressed), waiting for the owner. Product decision for the
+maintainer: this repo already builds nsh from the `hexuria/nsh` branch
+`linux-traffic-lights` (Linux traffic lights); #2116 could be carried there
+to fix the CI build before an nsh release — not done here (no fork changes).
+
+
 nsh-platform-gpui 0.4 builds a web view inside `prepaint` while GPUI holds the
 app; WebView2 creation pumps messages; a queued GPUI task re-borrows the app:
 `RefCell already borrowed` (gpui-fast `async_context.rs:178`), exit
@@ -474,8 +482,10 @@ on the GPU (here: WARP) before the readback.
   full screen (`m4-hls-controls.png`, `m4-hls-paused.png`).
 - CPU while a 1080p HLS stream plays at 960×540: ≈ 118 % of one core
   (Media Foundation's software decode + WARP), on 2 vCPUs.
-- Subtitle renditions: `IMFTimedText` cues verified in the standalone probe
-  (Apple bipbop, WebVTT); **not yet verified through the app's controls**.
+- Subtitle renditions: Apple's bipbop (`img_bipbop_adv_example_ts`) through
+  the local proxy: `load` lists English audio and an English subtitle track
+  (`t0`); `selectSubtitle t0` → `tracks` with `t0` selected → `cues`
+  `{time: 0.008, lines: ["Subtitles: Bip!"]}` (nativetest `trackSelect`).
 - **Real sources not tested with the native player**: the resolver finds
   no stream link on Windows yet (`candidates=0`): its hidden web view keeps
   a 200×200 viewport and its media sniffer runs only in the main frame.
@@ -635,8 +645,8 @@ Verified with injected mouse input on this VM (`m7-*.png`):
   keyboard focus from the session's foreground lock); Snap Layouts (the
   Windows 11 flyout on the maximize button — this is a Windows 10–based
   Server; the maximize button answers `HTMAXBUTTON`, which Windows 11 needs).
-- To report upstream (nsh): `drag_area` should let caption presses through
-  on Windows (or `start_window_move` should start the OS move loop there).
+- Reported upstream: longbridge/nsh#2143 (`drag_area` should let caption
+  presses through on Windows).
 
 ## Milestone 8 — package — DONE (CI zip; the crash fix is still upstream)
 

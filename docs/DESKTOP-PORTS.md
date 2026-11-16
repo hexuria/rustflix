@@ -757,10 +757,14 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   caption itself in a layered child window above it (`CaptionWindow`: GDI
   text into a bitmap with per-pixel alpha; white, semibold, the app's soft
   shadow; a line is italic when all of it is), from
-  `sys.nativeVideo {caption}`. Verified with a fixed test caption over the
-  playing picture (62 % app CPU); the app-to-player hand-over of real
-  subtitles is the same call path as `uncovered` but was not exercised with
-  a subtitled title here.
+  `sys.nativeVideo {caption}`. Verified end to end: cues given to the app's
+  caption component show in that window and change with each cue while the
+  picture stays in its window (67 % app CPU).
+  Known, upstream: gpui-fast 0.1.10 panics (`RefCell already borrowed`,
+  `async_context.rs`) when a hit-test message reaches it inside WebView2's
+  creation pump; showing or hiding a window under the pointer sends one,
+  so this path can meet it while a hidden web view is being made (seen
+  once). gpui-fast main defers those callbacks.
   Limits: controls put the picture back on the GPUI path while they show; a
   cropped picture (`fit: cover`) stays on it; a line mixing italic and
   upright text is drawn upright.

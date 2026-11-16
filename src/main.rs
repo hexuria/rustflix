@@ -6,6 +6,10 @@
 //! TMDB client, library storage, the WebView/Video player). The host
 //! only chooses the window and serves `nsh/base`.
 
+// Windows: a release build is a GUI program (no console window opens
+// beside it); a debug build keeps its console for the logs.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 
 use nsh_engine::HostChannel;
@@ -16,6 +20,8 @@ mod appkit;
 mod webguard;
 #[cfg(target_os = "linux")]
 mod webkitgtk;
+#[cfg(target_os = "windows")]
+mod win;
 mod perf;
 mod player;
 mod stream;
@@ -59,6 +65,8 @@ fn bundle_path() -> PathBuf {
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(target_os = "windows")]
+    win::before_gpui();
     // env_logger, with the engine's `nsh::perf` lines going to the perf
     // recorder (src/perf.rs) instead of stderr.
     perf::init_logging();

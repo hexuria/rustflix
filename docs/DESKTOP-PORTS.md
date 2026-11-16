@@ -337,3 +337,70 @@ Results land in `rustflix.nativetest.result` (incremental). Requires
 Note for local runs: the app loads `nsh/` from beside the executable,
 so after `cargo build` copy `target/.../out/app/*` into the runnable
 folder's `nsh/` — the TSX bundle is not embedded in the binary.
+
+---
+
+# Windows (branch `port/windows-v2`)
+
+Written fresh on top of main `9f330db` (the old `port/windows` branch
+is not used; facts taken from it were re-checked here).
+
+**Test machine.** Windows Server 2022, 2 vCPUs, 8 GB, **no GPU**: Direct3D is
+the Microsoft Basic Render Driver (WARP, `d3d10warp.dll`). Sampled while
+scrolling Home: ~160 % of a core in WARP's thread-pool workers, ~3 % on the
+app's main thread. The UI is slow here because the picture is rasterised on
+the CPU, not because of app code. Real sources: the Vidfast source played in
+the web-page player on this machine (not blocked by Cloudflare); others were
+not tried. No audio device on this VM: sound output is unverified.
+
+## Upstream dependency (startup crash)
+
+nsh-platform-gpui 0.4 builds a web view inside `prepaint` while GPUI holds the
+app; WebView2 creation pumps messages; a queued GPUI task re-borrows the app:
+`RefCell already borrowed` (gpui-fast `async_context.rs:178`), exit
+0xC0000409. Fixes, both open and unreleased:
+
+- longbridge/gpui-fast#145: defers GPUI messages that call into the app while
+  it is borrowed; drains them in order, also from OS modal loops.
+- longbridge/nsh#2116: builds Windows web views outside the app borrow.
+
+Until one ships, local runs use gpui-fast 0.1.10 with #145 backported, applied
+through `C:\work\.cargo\config.toml` (`[patch.crates-io]`), **outside this repo**.
+Nothing patched is committed, so the CI build of this branch still has the
+crash: the windows-latest smoke test is expected to exit early until a
+released gpui-fast/nsh contains a fix.
+
+## Milestone 1 — it starts — DONE (with the local patch)
+
+- `cargo build` of this branch + patched gpui-fast: the window opens, Home
+  loads (hero, Trending, Now Playing), no panic.
+- Driven for minutes with injected input: Home ↔ Search ↔ Settings ↔
+  Downloads, scrolling, search typing, Details, Play. Process stays up and
+  responding. Screenshots: `C:\tools\shots\m1-start.png`, `m2-*.png`.
+- Release builds are GUI-subsystem programs (no console window); debug
+  builds keep the console for logs.
+
+## Milestone 2 — the interface with the web-page player — DONE
+
+- Home, navigation, Search (typing + results + filter chips), Settings
+  (all panes listed), Downloads (empty state), Details all render and react.
+- **WebView2 pages were black.** GPUI's DirectComposition target is created
+  topmost (`CreateTargetForHwnd(hwnd, true)`, gpui-fast-windows
+  `directx_renderer.rs`), so it is composed above child windows, and every
+  wry web view is a child window (`WRY_WEBVIEW` → `Chrome_WidgetWin_*`). The
+  page was there (`page: video ready` in the log; child window visible at
+  the right rect) but under GPUI's picture. `src/win` sets
+  `GPUI_DISABLE_DIRECT_COMPOSITION=true` before GPUI starts (kept if the user
+  set it): GPUI then presents through a swap chain on the window, which
+  child windows draw above, as a WKWebView sits above GPUI on macOS.
+  Verified: Play → the source's page plays in the window
+  (`m2-code-play-60s.png`).
+- Known, upstream: while WebView2 is created (nested message pump inside the
+  draw), GPUI drops frame and input callbacks that find the app borrowed
+  (`ERROR RefCell already borrowed` lines, up to ~20 in ~3 s at startup in
+  some runs, none in others). Clicks in that window are lost. nsh#2116 is
+  the real fix.
+- Typing is slow on this VM (SendKeys waited ~1 s per key in a debug build:
+  each key re-renders the results on WARP). Not measured in release yet.
+- Downloads shows "0 KB free": `fs.space` has no Windows implementation yet
+  (Milestone 4).

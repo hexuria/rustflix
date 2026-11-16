@@ -4,7 +4,7 @@ name: Desktop ports
 
 on:
   push:
-    branches: [spike/desktop-ports, port/linux]
+    branches: [spike/desktop-ports, port/linux, port/windows-v2]
   workflow_dispatch:
 
 permissions:

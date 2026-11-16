@@ -723,8 +723,15 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   sprite atlas (`paint_image`) waits 8–21 ms for WARP to finish with the
   atlas texture the previous frame draws from (p50 0.5 ms, p90 34 ms per
   paint). gpui-fast 0.1.10's atlas has no path for an image that changes
-  every frame; gpui-fast main has one (`fast::dynamic_textures`), which
-  needs the move to a newer gpui-fast / nsh 0.5.
+  every frame. Moving the upload off the CPU's path (a texture made with
+  the pixels and a queued copy, tried in the local patch) removed that wait
+  but not the ceiling (22.9–23.9 fps over 4 runs): the frame rate is bounded
+  by WARP drawing each frame (~40 ms, mostly the full-window picture). Past
+  it, the picture has to be composed outside GPUI's frame (Media Foundation
+  into a DirectComposition surface under a transparent GPUI base), which
+  needs gpui-fast (a non-topmost composition target, so WebView2 child
+  windows stay visible; an external surface below the base) and NSH (a
+  transparent window; pages under the player not painted) — not done.
 - **Next, prototyped only** (`C:\tools\perf-p3.md`, not in any repo):
   partial redraw of scrolled frames in the renderer (copy the previous frame
   shifted, draw only the exposed strip and what changed, scissored): Home

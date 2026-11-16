@@ -637,3 +637,24 @@ Verified with injected mouse input on this VM (`m7-*.png`):
   Server; the maximize button answers `HTMAXBUTTON`, which Windows 11 needs).
 - To report upstream (nsh): `drag_area` should let caption presses through
   on Windows (or `start_window_move` should start the OS move loop there).
+
+## Milestone 8 — package — DONE (CI zip; the crash fix is still upstream)
+
+- `desktop-ports.yml` (windows-latest) now uploads `rustflix-windows-x86_64.zip`:
+  `rustflix.exe` (GUI subsystem, release), `nsh/` (the TSX bundle) and
+  `README.txt` (`packaging/windows/README.txt`: requirements — Windows 10 1809+
+  / 11 x64, the WebView2 runtime with where to get it, Media Foundation /
+  the Media Feature Pack on N editions; where the app keeps its data; not
+  signed yet). No installer, no signing (as asked).
+- Verified locally with the same layout: the folder copied to the Desktop
+  and the zip expanded run as is; no console window; WebView2's profile goes
+  to `%LOCALAPPDATA%\com.hexuria.rustflix\WebView2`, nothing is written beside
+  the executable.
+- **The CI-built zip still crashes at startup** (`RefCell already borrowed`,
+  exit 0xC0000409 — the windows-latest smoke step shows it) until a released
+  gpui-fast contains longbridge/gpui-fast#145 or a released nsh contains
+  longbridge/nsh#2116; every local verification above used gpui-fast 0.1.10
+  with #145 backported (`C:\work\.cargo\config.toml`, outside the repo). Once
+  either ships, the version bump goes in `Cargo.toml`/`Cargo.lock` (nsh 0.5.x
+  needs gpui-fast ≥ 0.1.13; that migration is its own change).
+- No extra DLLs: Media Foundation and WebView2 are Windows'.

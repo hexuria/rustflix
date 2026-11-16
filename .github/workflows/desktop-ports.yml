@@ -137,6 +137,7 @@ jobs:
           mkdir -p dist/rustflix-windows-x86_64
           cp target/release/rustflix.exe dist/rustflix-windows-x86_64/
           cp -R "$(dirname "$nshc")" dist/rustflix-windows-x86_64/nsh
+          cp packaging/windows/README.txt dist/rustflix-windows-x86_64/
           find dist -maxdepth 3 | sort
 
       - name: Smoke test (15 s)
@@ -155,9 +156,16 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/smoke.err" -Tail 60
           Stop-Process -Id $p.Id -Force
 
+      # The runnable folder as one .zip (no installer, not signed yet); the
+      # README inside names what Windows must have (WebView2 runtime, Media
+      # Foundation).
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist/rustflix-windows-x86_64 -DestinationPath rustflix-windows-x86_64.zip -Force
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rustflix-windows-x86_64
-          path: dist/rustflix-windows-x86_64
+          path: rustflix-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 7

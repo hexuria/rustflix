@@ -355,6 +355,13 @@ not tried. No audio device on this VM: sound output is unverified.
 
 ## Upstream dependency (startup crash)
 
+**Blocked upstream (shipping only).** Per the task, milestones are verified
+with the local patch; the CI-built zip crashes until a fixed gpui-fast or nsh
+is released (CI run 43788529299: `exited early with code -1073740791`,
+`RefCell already borrowed` at gpui-fast-0.1.10 `async_context.rs:178:28`).
+Environment limits (this VM, not the app): no audio device (sound and mute
+audible effect unverifiable), no GPU (hardware decode unverifiable).
+
 **Status (2026-11-16):** longbridge/nsh#2116 is **merged** but not released
 (latest nsh-platform-gpui is 0.5.1); longbridge/gpui-fast#145 is reviewed
 (all points addressed), waiting for the owner. Product decision for the
@@ -387,6 +394,11 @@ released gpui-fast/nsh contains a fix.
   responding. Screenshots: `C:\tools\shots\m1-start.png`, `m2-*.png`.
 - Release builds are GUI-subsystem programs (no console window); debug
   builds keep the console for logs.
+
+- **Timed run (release, 2026-11-16):** 130.7 s of continuous injected
+  navigation — Search (typed "fallout", results), Settings → Downloads,
+  Downloads, Home with scrolling, back and forth — process alive and
+  responding afterwards, 0 panics in the log (`m1-nav-*.png`).
 
 ## Milestone 2 — the interface with the web-page player — DONE
 
@@ -641,10 +653,18 @@ Verified with injected mouse input on this VM (`m7-*.png`):
   maximize. The title bar's own buttons (back/forward) still work.
 - **Full screen**: the player's full-screen button fills the screen
   (`0,0–1920,1080`, over the taskbar) and restores the window.
-- Not verified: the Esc key in full screen (the test input could not take
-  keyboard focus from the session's foreground lock); Snap Layouts (the
-  Windows 11 flyout on the maximize button — this is a Windows 10–based
-  Server; the maximize button answers `HTMAXBUTTON`, which Windows 11 needs).
+- **Keyboard**: player shortcuts reach the app — `m` muted the native player
+  (Media Foundation VOLUMECHANGE) once the window was activated. The test
+  input can only activate the window with an Alt tap, which also enters
+  NSH's Windows menu-bar mode.
+- **Open**: `Esc` ("dismiss": closes the player on macOS) did not close the
+  player in three injected attempts, in or out of full screen; whether the
+  Alt-tap menu mode or the app swallows it is not determined. Full screen is
+  left with the player's button (verified) — the goal's milestone does not
+  depend on `Esc`, but this needs a check with a real keyboard.
+- **Not available here**: Snap Layouts (the Windows 11 flyout on the maximize
+  button; this is a Windows 10–based Server — the maximize button answers
+  `HTMAXBUTTON`, which is what Windows 11 needs).
 - Reported upstream: longbridge/nsh#2143 (`drag_area` should let caption
   presses through on Windows).
 

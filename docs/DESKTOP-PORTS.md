@@ -705,8 +705,10 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   patch here). Primitives a later opaque rectangle or opaque image hides are
   not drawn; partly covered plain quads are drawn as their uncovered pieces.
   Pixel tests compare culled and whole drawing byte for byte.
-  Home scrolling: quads 5.7× → 1.9× the window, `Present` ~300 → ~100 ms,
-  CPU 165% → ~110%.
+  Home scrolling (re-measured at the PR's head `ea0bf1f`, 3 runs): quads
+  5.7× → 1.64× the window (+ 0.58× images), `Present` ~300 → 99–104 ms,
+  CPU 165% → 81–106%. Player painted as a GPUI image: quads 1.04× → 0.11×,
+  23.7–24.0 frames painted a second at ~110% CPU.
 - **rustflix: video frames through the CPU** (`src/player/win/wic.rs`).
   On the Basic Render Driver the media engine converted each frame on WARP:
   60–90 ms for a 640×360 frame (~8 fps shown). Without a DXGI manager the

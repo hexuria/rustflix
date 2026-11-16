@@ -753,7 +753,16 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   The mouse passes through the window. Measured on the 848×480 HLS
   download: every decoded frame shown (53 of 53 per second; 16–25 before),
   app CPU ~135–160 % → ~60 % (+ dwm ~40 % at that frame rate).
-  Limits: captions and controls put the picture back on the GPUI path while
-  they show; a cropped picture (`fit: cover`) stays on it.
+  Captions: while the picture is in its window, the player draws the app's
+  caption itself in a layered child window above it (`CaptionWindow`: GDI
+  text into a bitmap with per-pixel alpha; white, semibold, the app's soft
+  shadow; a line is italic when all of it is), from
+  `sys.nativeVideo {caption}`. Verified with a fixed test caption over the
+  playing picture (62 % app CPU); the app-to-player hand-over of real
+  subtitles is the same call path as `uncovered` but was not exercised with
+  a subtitled title here.
+  Limits: controls put the picture back on the GPUI path while they show; a
+  cropped picture (`fit: cover`) stays on it; a line mixing italic and
+  upright text is drawn upright.
 - On any machine with a GPU none of this is visible: the app's own work per
   frame is ~1.5 ms.

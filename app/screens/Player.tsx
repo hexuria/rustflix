@@ -94,7 +94,7 @@ import {
 import { cancelResolve, resolveStream, warmResolver, type ResolveRequest } from "../lib/resolver";
 import { PLAYER_SOURCES } from "../lib/sources";
 import { motionReduced, settings } from "../lib/store";
-import { Captions, captionShown } from "./Captions";
+import { Captions } from "./Captions";
 import { focusContent, restoreBrightness, webBackground } from "../lib/system";
 import { Button } from "../lib/ui";
 import { closeEpisodes, EpisodePicker, openEpisodes, showEpisodes } from "./EpisodePicker";
@@ -181,14 +181,14 @@ function NativeStage(props: { mobile: boolean }) {
   // Windows only: whether anything is drawn over the picture. While
   // nothing is, on a machine without a GPU, the player shows the picture
   // in a child window above the app's drawing (src/player/win/direct.rs).
-  // Anything but plain playback counts as covered.
+  // Anything but plain playback counts as covered; captions do not (the
+  // player draws them over that window itself).
   const covered = computed(() => {
     if (platform.os !== "windows") return true;
     return (
       playerPhase() !== "playing" ||
       controlsVisible() ||
       playerPopup() !== null ||
-      captionShown() ||
       skipSegment() !== null ||
       skipPill() !== null ||
       showPalette() ||

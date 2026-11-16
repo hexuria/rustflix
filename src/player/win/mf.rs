@@ -88,6 +88,8 @@ struct Shared {
     picture: (u32, u32),
     /// `sys.nativeVideo {uncovered}`: nothing is drawn over the picture.
     uncovered: bool,
+    /// `sys.nativeVideo {caption}`: the caption the app shows now.
+    caption: Option<super::direct::Caption>,
 }
 
 /// Work for the player's thread.
@@ -153,6 +155,23 @@ pub(crate) fn control(handle: u64, data: &Value) -> bool {
     }
     if let Some(v) = data.get("maxResolution") {
         send(Msg::MaxRes(size_of(Some(v))));
+    }
+    if let Some(v) = data.get("caption") {
+        let caption = v.get("lines").and_then(Value::as_array).map(|lines| super::direct::Caption {
+            lines: lines
+                .iter()
+                .filter_map(|l| {
+                    let text = l.get("text")?.as_str()?.to_owned();
+                    Some((text, l.get("italic").and_then(Value::as_bool).unwrap_or(false)))
+                })
+                .collect(),
+            font: v.get("font").and_then(Value::as_f64).unwrap_or(24.0) as f32,
+            bottom: v.get("bottom").and_then(Value::as_f64).unwrap_or(40.0) as f32,
+        });
+        if let Some(shared) = e.shared.upgrade() {
+            shared.lock().unwrap().caption = caption.filter(|c| !c.lines.is_empty());
+        }
+        (e.redraw)();
     }
     if let Some(v) = data.get("uncovered").and_then(Value::as_bool) {
         if let Some(shared) = e.shared.upgrade() {
@@ -322,6 +341,11 @@ impl Player {
     /// Whether the app says nothing is drawn over the picture.
     pub(crate) fn uncovered(&self) -> bool {
         self.shared.lock().map(|s| s.uncovered).unwrap_or(false)
+    }
+
+    /// The caption the app shows now.
+    pub(crate) fn caption(&self) -> Option<super::direct::Caption> {
+        self.shared.lock().ok()?.caption.clone()
     }
 
     /// The size of the last frame made, in pixels.

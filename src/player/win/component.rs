@@ -62,6 +62,10 @@ pub(crate) struct Video {
     direct: Option<Rc<RefCell<direct::Window>>>,
     direct_on: bool,
     hide_pending: bool,
+    /// The captions' window above it; `captions_failed` once it could not
+    /// be made (the picture then stays GPUI's while a caption shows).
+    captions: Option<Rc<RefCell<direct::CaptionWindow>>>,
+    captions_failed: bool,
 }
 
 impl Video {
@@ -85,6 +89,8 @@ impl Video {
             direct: None,
             direct_on: false,
             hide_pending: false,
+            captions: None,
+            captions_failed: false,
         }
     }
 
@@ -129,6 +135,22 @@ impl Video {
         self.player.set_direct(want, hwnd);
     }
 
+    /// The captions' window, made on first use; `None` where the system
+    /// makes no layered child windows.
+    fn captions_window(&mut self) -> Option<Rc<RefCell<direct::CaptionWindow>>> {
+        if self.captions.is_none() && !self.captions_failed {
+            match crate::win::shell::app_window().map(direct::CaptionWindow::new) {
+                Some(Ok(window)) => self.captions = Some(Rc::new(RefCell::new(window))),
+                Some(Err(e)) => {
+                    log::debug!("player: no window for captions: {e}");
+                    self.captions_failed = true;
+                }
+                None => {}
+            }
+        }
+        self.captions.clone()
+    }
+
     /// Hides the child window once GPUI's picture has had a frame.
     fn hide_direct(&mut self, painted: bool) {
         let Some(window) = self.direct.as_ref() else { return };
@@ -156,6 +178,8 @@ struct FrameElement {
     image: Option<Arc<gpui::RenderImage>>,
     /// The child window to put where the picture goes, and the picture's size.
     place: Option<(Rc<RefCell<direct::Window>>, (u32, u32))>,
+    /// The captions' window and what it shows over the picture's window.
+    caption: Option<(Rc<RefCell<direct::CaptionWindow>>, Option<direct::Caption>)>,
     drop: Option<Arc<gpui::RenderImage>>,
     object_fit: ObjectFit,
     style: StyleRefinement,
@@ -222,6 +246,16 @@ impl Element for FrameElement {
                 child.borrow_mut().place((x, y, r - x, b - y));
             }
         }
+        if let Some((captions, caption)) = self.caption.take() {
+            let scale = window.scale_factor();
+            let device = |v: Pixels| (f32::from(v) * scale).round() as i32;
+            let (x, y) = (device(bounds.origin.x), device(bounds.origin.y));
+            let area = (x, y, device(bounds.origin.x + bounds.size.width) - x, device(bounds.origin.y + bounds.size.height) - y);
+            match caption {
+                Some(caption) => captions.borrow_mut().show(&caption, area, scale),
+                None => captions.borrow_mut().hide(),
+            }
+        }
         let Some(image) = self.image.clone() else { return };
         if image.frame_count() == 0 {
             return;
@@ -250,6 +284,9 @@ impl NativeComponent for Video {
     fn render(&mut self, window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
         let f = self.frame;
         if f.w <= 0.0 || f.h <= 0.0 {
+            if let Some(captions) = &self.captions {
+                captions.borrow_mut().hide();
+            }
             self.set_direct(false);
             self.hide_direct(false);
             return None;
@@ -267,20 +304,29 @@ impl NativeComponent for Video {
         };
         // Outside GPUI while nothing is drawn over the picture, where GPUI
         // draws on the CPU; a cropped picture (cover) stays GPUI's.
-        let want = self.player.uncovered() && matches!(fit, ObjectFit::Contain) && direct::allowed(direct::software());
+        let mut want = self.player.uncovered() && matches!(fit, ObjectFit::Contain) && direct::allowed(direct::software());
+        // A caption shows over the picture's window in a window of its own.
+        let caption = self.player.caption();
+        let captions = if want && caption.is_some() { self.captions_window() } else { self.captions.clone() };
+        if caption.is_some() && captions.is_none() {
+            want = false;
+        }
         self.set_direct(want);
-        let (image, place) = if self.direct_on {
+        let (image, place, caption) = if self.direct_on {
             let place = self.direct.clone().map(|w| (w, self.player.picture_size()));
-            (None, place)
+            (None, place, captions.map(|w| (w, caption)))
         } else {
+            if let Some(captions) = &captions {
+                captions.borrow_mut().hide();
+            }
             let image = self.shown_image();
             self.hide_direct(image.is_some());
-            (Some(image?), None)
+            (Some(image?), None, None)
         };
         // The element itself carries the frame rect: a child with default
         // style would lay out 0x0 and paint nothing.
         Some(
-            FrameElement { image, place, drop: self.retired.take(), object_fit: fit, style: StyleRefinement::default() }
+            FrameElement { image, place, caption, drop: self.retired.take(), object_fit: fit, style: StyleRefinement::default() }
                 .absolute()
                 .left(px(f.x))
                 .top(px(f.y))

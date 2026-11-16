@@ -11,9 +11,9 @@
 // at the playback rate on a 100 ms tick (never more than 0.5 s ahead), so
 // cues change on time.
 
-import { cleanup, computed, effect, signal, Text, untracked, View } from "nsh";
+import { cleanup, computed, effect, platform, signal, Text, untracked, View } from "nsh";
 import { mediaPaused, mediaRate, playerPhase, position, subtitleOffset } from "../lib/player";
-import { captionConfig, embeddedCues, nativeCaptions } from "../lib/playback/nativeBackend";
+import { captionConfig, embeddedCues, nativeCaptions, setNativeCaption } from "../lib/playback/nativeBackend";
 import { nativeInfo } from "../lib/playback/caps";
 import { settings } from "../lib/store";
 
@@ -52,10 +52,6 @@ function segments(line: string, startItalic: boolean): { text: string; italic: b
   }
   return out;
 }
-
-/** Whether a caption is on screen now (Windows: the picture then stays
- * under the app's drawing, see NativeVideo's `overlay`). */
-export const captionShown = signal(false);
 
 export function Captions(props: { mobile: boolean; size: () => { w: number; h: number } }) {
   // The player's time, carried forward between reports.
@@ -131,11 +127,26 @@ export function Captions(props: { mobile: boolean; size: () => { w: number; h: n
     return out;
   });
 
-  effect(() => {
-    const on = lines().length > 0;
-    untracked(() => captionShown.set(on));
-  });
-  cleanup(() => captionShown.set(false));
+  // Windows: the player draws the caption itself while the picture is in
+  // a window of its own, above this view (lib/playback/nativeBackend.ts).
+  if (platform.os === "windows") {
+    effect(() => {
+      const ls = lines();
+      const { fs, bottom } = layout();
+      const caption = ls.length
+        ? {
+            lines: ls.map((l) => ({
+              text: l.segs.map((s) => s.text).join(""),
+              italic: l.segs.length > 0 && l.segs.every((s) => s.italic),
+            })),
+            font: fs,
+            bottom,
+          }
+        : null;
+      untracked(() => setNativeCaption(caption));
+    });
+    cleanup(() => setNativeCaption(null));
+  }
 
   return (
     <If when={lines().length > 0}>

@@ -319,6 +319,16 @@ export function setNativeUncovered(on: boolean): void {
   control({ uncovered: on });
 }
 
+/** Windows: the caption on screen now (its lines, the font size and the
+ * distance from the picture area's bottom, in points), or null. While the
+ * picture is in its own window the player draws it there itself, over the
+ * picture (src/player/win/direct.rs); the app's own caption is under it. */
+export function setNativeCaption(
+  caption: { lines: { text: string; italic: boolean }[]; font: number; bottom: number } | null,
+): void {
+  control({ caption });
+}
+
 let lastNowPlaying: { title: string; subtitle?: string; artwork?: string } | null = null;
 /** Lock screen / Now Playing / media keys info (iOS, macOS), also through
  * the handle so it is current before a frame is drawn. */

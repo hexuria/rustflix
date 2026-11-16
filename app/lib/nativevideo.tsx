@@ -106,6 +106,8 @@ export async function controlVideo(
     nowPlaying?: { title: string; subtitle?: string; artwork?: string } | null;
     /** Windows: nothing is drawn over the picture (see setNativeUncovered). */
     uncovered?: boolean;
+    /** Windows: the caption on screen (see setNativeCaption). */
+    caption?: { lines: { text: string; italic: boolean }[]; font: number; bottom: number } | null;
   },
 ): Promise<boolean> {
   return !!(await call<{ ok: boolean }>("sys.nativeVideo", { handle, ...data }))?.ok;

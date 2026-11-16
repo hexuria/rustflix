@@ -404,3 +404,121 @@ released gpui-fast/nsh contains a fix.
   each key re-renders the results on WARP). Not measured in release yet.
 - Downloads shows "0 KB free": `fs.space` has no Windows implementation yet
   (Milestone 4).
+
+## Milestone 3 — native player `rustflix.video` — IMPLEMENTED (verification below)
+
+### Decoder choice (smallest install burden that meets the contract)
+
+| Option | HLS | Contract fit | Install burden | Verdict |
+|---|---|---|---|---|
+| **Media Foundation `IMFMediaEngine`** (frame-server mode) | yes: master playlist, rendition switches (`FORMATCHANGE`) | HTML5-like events (load, seeked, waiting, ended, error with codes); audio streams via `IMFMediaEngineEx`; WebVTT renditions via `IMFTimedText` with cue start/duration/text; rate, volume, mute, `GetBuffered` | **none**: part of Windows (desktop editions; Server with Desktop Experience; N editions need the Media Feature Pack) | **chosen** |
+| WinRT `MediaPlayer` + `AdaptiveMediaSource` | yes | frame server works, but less control over tracks/timed text than the engine | none | not needed |
+| GStreamer (shares `src/player/linux/gst.rs`'s logic) | yes | complete | runtime + plugins installed separately (~100 MB), LGPL | rejected: install burden |
+| libmpv | yes | complete | ~120 MB DLL + `vulkan-1.dll` beside the exe | rejected: install burden |
+
+Measured here with a standalone probe (`IMFMediaEngine` + D3D11 device on
+the Basic Render Driver, no app): the mux HLS test stream loads its
+metadata in 0.6 s, plays 1920×1080 at the stream's rate (switching up to
+its 60 fps rendition); per frame `TransferVideoFrame` into a BGRA texture
+took 3–4 ms and the staging readback 4–14 ms (WARP, 1080p). Apple's
+`img_bipbop_adv_example_ts` shows its English WebVTT rendition as an
+`IMFTimedText` track whose cues arrive with start, duration and text.
+
+### Painting (what gpui-fast 0.1.10 accepts on Windows)
+
+`Window::paint_surface` (zero-copy video surfaces) is macOS/iOS-only. The
+DirectX renderer takes images through the sprite atlas (`paint_image` with
+a `RenderImage`), which is what Linux uses: each new frame is read back to
+BGRA once and uploaded once; the previous frame's tile is dropped. A 1080p
+frame is ~8 MB per upload, so the decoded size is capped to the picture's
+size on screen in pixels (and `maxResolution`): `TransferVideoFrame` scales
+on the GPU (here: WARP) before the readback.
+
+### Implementation (`src/player/win/`)
+
+- `mf.rs`: one worker thread per player owns the D3D11 device (GPU when
+  present → hardware decode, else WARP), the engine, its timed-text service
+  and the textures. Props, `sys.nativeVideo` and Media Foundation's
+  callbacks only queue messages for it; the main thread only reads the
+  newest frame from a mutex. While a frame may be due it asks
+  `OnVideoStreamTick` every 8 ms; a paused picture makes no frames and no
+  redraws (the worker then only wakes for its 4 Hz tick).
+- Events as on Linux: `ready`, `frame` (first frame), `load` (duration,
+  size, tracks), `progress` (4 Hz; `buffered`/`playable` = end of the
+  buffered range playback is in), `buffer` (WAITING/BUFFERINGSTARTED vs
+  PLAYING/BUFFERINGENDED), `seeked` (SEEKED, 5 s fallback in the tick),
+  `rate` (on pause changes), `end`, `error` (`network`/`decode`/
+  `unsupported`/`drm`/`aborted` + HRESULT), `tracks`, `cues`.
+- `startAt` goes out as the first `SetCurrentTime` once the metadata is
+  in, before `Play`; `progress` reports the target until playback is there.
+- `maxResolution` caps the decoded picture (not the rendition Media
+  Foundation picks by bandwidth). `pip`/`nowPlaying`: not on Windows.
+- `sys.nativeVideoInfo.available` probes the engine's class factory once.
+
+### Milestone 3 — verification (release build, this VM)
+
+- **HLS through the local proxy** (`dl.stream.open` → `rustflix.video`,
+  nativetest `{"stream": {...mux x36xhzz...}}`): first frame 1.0–3.0 s,
+  `load` 634.6 s with its audio track; seeks to 10 / 50 / 90 % landed
+  within 15–400 ms (`finished: true`); a forced upstream 403 → `expired` →
+  playback resumed (stall 0.4 s). Frames arrive at the stream's rate (~31/s
+  at 1080p source, decoded at the 960×540 picture); the TSX press target
+  draws over the picture (`m3-rel-a.png`, `m3-rel-b.png`: the picture
+  moves between them).
+- **Debug builds are not representative**: the proxy (rustls, unoptimised)
+  delayed the first frame to 7–12 s and the frame rate fell to 4–8/s.
+- **Paused = no redraws**: real Player screen, HLS download, pause →
+  rustflix 0.0 % of a core over 8 s; playing 480p ≈ 29 % (decode + WARP).
+- **App's own controls over the picture** (real Player screen,
+  Downloads → Play): ±10 s, play/pause, progress, speed, subtitles, volume,
+  full screen (`m4-hls-controls.png`, `m4-hls-paused.png`).
+- CPU while a 1080p HLS stream plays at 960×540: ≈ 118 % of one core
+  (Media Foundation's software decode + WARP), on 2 vCPUs.
+- Subtitle renditions: `IMFTimedText` cues verified in the standalone probe
+  (Apple bipbop, WebVTT); **not yet verified through the app's controls**.
+- **Real sources not tested with the native player**: the resolver finds
+  no stream link on Windows yet (`candidates=0`): its hidden web view keeps
+  a 200×200 viewport and its media sniffer runs only in the main frame.
+  Both need the web-view hook of Milestone 5.
+- Not verifiable here: sound (no audio device on this VM), hardware decode
+  (no GPU).
+
+## Milestone 4 — downloads — DONE (in-app downloading of a title: not tested)
+
+- **Finished downloads play** in `rustflix.video` from the downloader's
+  127.0.0.1 server (`local: true`): nativetest `{"playdownload": 1}` (mp4)
+  and `{"playdownload": 2}` (HLS: `index.m3u8` + segments) go through the
+  real Downloads → Play path; phase `playing` in ~3.5 s, title bar shows the
+  downloaded mark (`m4-playdl-mp4.png`). The two records were made by hand
+  (folder + `.rustflix-download` marker + `rustflix-downloads.json` entry),
+  as a finished download leaves them.
+- **`fs.space`**: `GetDiskFreeSpaceExW` (`src/win/shell.rs`). Downloads
+  shows "4.1 MB used · 18 GB free" (`m4-downloads.png`).
+- **Reveal in Explorer**: `SHOpenFolderAndSelectItems` (the old
+  `explorer /select,…` broke on paths with spaces). Row menu → Show in
+  folder opened the record folder with the file selected (`m4-reveal.png`).
+- **Recycle Bin**: `IFileOperation` with `FOFX_RECYCLEONDELETE`, no UI. A
+  progress sink refuses any item the shell would delete for good instead
+  (its `PreDeleteItem` lacks `TSF_DELETE_RECYCLE_IF_POSSIBLE`), like the
+  Linux Trash never falling back to deleting. Before this, Windows deleted
+  permanently. Verified: row menu → Delete download → "dl: #1 removed
+  (folder trashed: true)", the folder in the Recycle Bin with its original
+  location; `trash_recycles` / `trash_refuses_where_it_would_delete`
+  (ignored tests, run by hand: a file on `\\localhost\C$` stays).
+- **Default download folder**: `dl` took the home folder from `HOME`, which
+  Windows programs do not have, so it was the *relative* `Downloads\rustflix`
+  (under whatever the working directory was). Now `USERPROFILE` on Windows;
+  a relative folder stored by such a build falls back to the default.
+- **Forbidden download folders** on Windows: `SystemRoot`, the Program
+  Files folders, `ProgramData`, `%USERPROFILE%\AppData`, the Recycle Bin and
+  the app's own folder (the Unix list does not apply).
+- **Path checks**: in a verbatim Windows path (`\\?\C:\…`, what
+  `canonicalize` returns) `/` is no separator, so `a/../b` was one
+  component that slipped past the `..` check and `PathBuf::push` then
+  resolved — out of the download folder. `files::inside` and
+  `folder::validate` now refuse such components (no change on Unix,
+  where no component holds a `/`).
+- `cargo test` on Windows: 95 passed (3 tests had Unix-only assumptions;
+  fixed for both).
+- Not tested: downloading a title in the app (the resolver needs Milestone
+  5 first); the downloader's own tests (local HTTP server, HLS, resume) pass.

@@ -1,6 +1,9 @@
 //! Windows shell glue (`cfg(target_os = "windows")` only).
 //!
 //! - [`before_gpui`]: process settings GPUI reads when it starts.
+//! - [`shell`]: free space, the Recycle Bin and Explorer (`fs.*`, `dl.*`).
+
+pub(crate) mod shell;
 
 /// Called first thing in `main`, before any thread exists and before
 /// GPUI's platform is created.

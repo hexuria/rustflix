@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(names(&dir.join("sub")), vec!["rustflix-downloads.json".to_owned()]);
         let j = rec.json();
         assert_eq!(j["type"], "tv");
-        assert_eq!(j["file"], dir.join("Show S1E2/index.m3u8").to_string_lossy().as_ref());
+        assert_eq!(j["file"], dir.join("Show S1E2").join("index.m3u8").to_string_lossy().as_ref());
         assert_eq!(j["waiting"], Value::Null);
         assert_eq!(j["done"], Value::Null);
         // Unfinished records have no file.

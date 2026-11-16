@@ -512,11 +512,13 @@ mod files {
         if !dir.is_absolute() || !path.is_absolute() {
             return None;
         }
-        if path
-            .components()
-            .chain(dir.components())
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
+        // In a verbatim Windows path (`\\?\C:\…`) `/` is no separator:
+        // `a/../b` is then one component, which `PathBuf::push` resolves —
+        // out of `dir`. On other systems no component holds a `/`.
+        let dotted = |n: &std::ffi::OsStr| n.as_encoded_bytes().split(|b| *b == b'/').any(|s| s == b".." || s == b".");
+        if path.components().chain(dir.components()).any(|c| {
+            matches!(c, Component::ParentDir | Component::CurDir) || matches!(c, Component::Normal(n) if dotted(n))
+        }) {
             return None;
         }
         let canon = fs::canonicalize(dir).ok()?;
@@ -584,7 +586,12 @@ mod files {
         Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn statvfs_free(dir: &Path) -> Option<u64> {
+        crate::win::shell::free_space(dir)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn statvfs_free(_dir: &Path) -> Option<u64> {
         None
     }
@@ -758,7 +765,13 @@ mod files {
         }
     }
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+    /// The Recycle Bin (never a permanent delete) and Explorer.
+    #[cfg(target_os = "windows")]
+    mod os {
+        pub(super) use crate::win::shell::{reveal, trash};
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "windows")))]
     mod os {
         use std::path::Path;
 
@@ -772,15 +785,10 @@ mod files {
         }
 
         pub(super) fn reveal(path: &Path) -> bool {
-            #[cfg(windows)]
-            let r = std::process::Command::new("explorer")
-                .arg(format!("/select,{}", path.display()))
-                .spawn();
-            #[cfg(not(windows))]
-            let r = std::process::Command::new("xdg-open")
+            std::process::Command::new("xdg-open")
                 .arg(path.parent().unwrap_or(path))
-                .spawn();
-            r.is_ok()
+                .spawn()
+                .is_ok()
         }
     }
 
@@ -836,7 +844,13 @@ mod files {
             assert_eq!(inside(&dir, &dir), None);
             assert_eq!(inside(&dir, Path::new("/etc/hosts")), None);
             assert_eq!(inside(&dir, Path::new("a.mp4")), None);
-            assert_eq!(inside(&dir, &dir.join("sub/../a.mp4")), None);
+            // Built as a string: on Windows `dir` is verbatim (canonical) and
+            // `join` would resolve the `..` before `inside` sees it.
+            let sep = std::path::MAIN_SEPARATOR_STR;
+            assert_eq!(inside(&dir, &PathBuf::from(format!("{}{sep}sub{sep}..{sep}a.mp4", dir.display()))), None);
+            // Verbatim Windows paths: `/` is no separator there.
+            #[cfg(windows)]
+            assert_eq!(inside(&dir, &PathBuf::from(format!(r"{}\sub/../../x", dir.display()))), None);
             assert_eq!(inside(&dir, &dir.join("../x")), None);
             // A sibling folder whose name starts with the folder's.
             let sib = PathBuf::from(format!("{}-other", dir.display()));

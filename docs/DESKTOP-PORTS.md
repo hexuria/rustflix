@@ -293,9 +293,10 @@ the app stays up.
   **Traffic lights**: upstream draws GTK-style round buttons at the
   right; the user asked for the macOS look, so `Cargo.toml` patches
   the `nsh-*` crates to `github.com/hexuria/nsh` branch
-  `linux-traffic-lights` (commit `6fb68b1`, on top of the published
-  0.4.0 — drop the `[patch.crates-io]` section once it lands
-  upstream). Linux now draws close/minimize/zoom circles at the left
+  `rustflix-0.5.1` (the v0.5.1 tag with the traffic lights, longbridge/nsh#2116
+  and a fix to build against gpui-fast 0.1.16; it replaced the branch
+  `linux-traffic-lights` on 0.4.0 — drop the `[patch.crates-io]` section
+  once a release has all three). Linux now draws close/minimize/zoom circles at the left
   with hover glyphs and reports the left title-bar inset like macOS.
   They need a compositor and a window manager that lists
   `_GTK_FRAME_EXTENTS` in `_NET_SUPPORTED` (GNOME, KDE, Xfce do;
@@ -353,37 +354,26 @@ the CPU, not because of app code. Real sources: the Vidfast source played in
 the web-page player on this machine (not blocked by Cloudflare); others were
 not tried. No audio device on this VM: sound output is unverified.
 
-## Upstream dependency (startup crash)
+## Upstream dependency (startup crash) — fixed (2026-11-17)
 
-**Blocked upstream (shipping only).** Per the task, milestones are verified
-with the local patch; the CI-built zip crashes until a fixed gpui-fast or nsh
-is released (CI run 43788529299: `exited early with code -1073740791`,
-`RefCell already borrowed` at gpui-fast-0.1.10 `async_context.rs:178:28`).
-Environment limits (this VM, not the app): no audio device (sound and mute
-audible effect unverifiable), no GPU (hardware decode unverifiable).
-
-**Status (2026-11-16):** longbridge/nsh#2116 is **merged** but not released
-(latest nsh-platform-gpui is 0.5.1); longbridge/gpui-fast#145 is reviewed
-(all points addressed), waiting for the owner. Product decision for the
-maintainer: this repo already builds nsh from the `hexuria/nsh` branch
-`linux-traffic-lights` (Linux traffic lights); #2116 could be carried there
-to fix the CI build before an nsh release — not done here (no fork changes).
-
-
-nsh-platform-gpui 0.4 builds a web view inside `prepaint` while GPUI holds the
-app; WebView2 creation pumps messages; a queued GPUI task re-borrows the app:
+nsh-platform-gpui 0.4 built a web view inside `prepaint` while GPUI held the
+app; WebView2 creation pumps messages; a queued GPUI task re-borrowed the app:
 `RefCell already borrowed` (gpui-fast `async_context.rs:178`), exit
-0xC0000409. Fixes, both open and unreleased:
+0xC0000409. The CI-built zip died at startup (e.g. run 43907524657: `exited
+early with code -1073740791`).
 
-- longbridge/gpui-fast#145: defers GPUI messages that call into the app while
-  it is borrowed; drains them in order, also from OS modal loops.
-- longbridge/nsh#2116: builds Windows web views outside the app borrow.
+Fixed in `d38995a`: the app builds on nsh 0.5.1 and gpui-fast 0.1.16, nsh
+taken from `hexuria/nsh` branch `rustflix-0.5.1`, which carries
+longbridge/nsh#2116 (Windows builds web views outside the app borrow; merged
+after 0.5.1). CI run 43983210923: the windows-latest smoke test is `still
+running after 15 s` with both of its web views made; locally, no
+`RefCell already borrowed` at start (dozens before). The smoke step fails
+the job again.
 
-Until one ships, local runs use gpui-fast 0.1.10 with #145 backported, applied
-through `C:\work\.cargo\config.toml` (`[patch.crates-io]`), **outside this repo**.
-Nothing patched is committed, so the CI build of this branch still has the
-crash: the windows-latest smoke test is expected to exit early until a
-released gpui-fast/nsh contains a fix.
+longbridge/gpui-fast#145 (defers GPUI messages that call into the app while
+it is borrowed, also from OS modal loops) is still open; it is no longer
+needed for the start. Local runs use gpui-fast 0.1.16 with #145, #149 and
+#150 applied (`C:\work\.cargo\config.toml`, **outside this repo**).
 
 ## Milestone 1 — it starts — DONE (with the local patch)
 
@@ -418,8 +408,8 @@ released gpui-fast/nsh contains a fix.
 - Known, upstream: while WebView2 is created (nested message pump inside the
   draw), GPUI drops frame and input callbacks that find the app borrowed
   (`ERROR RefCell already borrowed` lines, up to ~20 in ~3 s at startup in
-  some runs, none in others). Clicks in that window are lost. nsh#2116 is
-  the real fix.
+  some runs, none in others). Clicks in that window are lost. Fixed by
+  nsh#2116, carried since `d38995a` (none at start since).
 - Typing is slow on this VM (SendKeys waited ~1 s per key in a debug build:
   each key re-renders the results on WARP). Not measured in release yet.
 - Downloads shows "0 KB free": `fs.space` has no Windows implementation yet
@@ -645,9 +635,11 @@ Verified with injected mouse input on this VM (`m7-*.png`):
   (`stop_propagation`, nsh-platform-gpui `chrome.rs` `drag_area`), so gpui-fast
   reports it handled and `DefWindowProc` never sees it; NSH's fallback
   `start_window_move` does nothing on Windows and its double click only
-  maximizes (`zoom_window`). `src/win/window.rs` subclasses GPUI's windows
-  so a left press or double click on the caption goes to `DefWindowProc`,
-  as for any captioned window. After it: the title bar drags the window;
+  maximizes (`zoom_window`). nsh 0.5 lets the press through on Windows
+  itself (longbridge/nsh#1525), so `DefWindowProc` moves the window; the
+  subclass this branch had for it (`src/win/window.rs`) went in `d38995a`.
+  Re-checked on nsh 0.5.1: dragging the title bar moves the window and a
+  double click maximizes and restores it. Before (with the subclass): the title bar drags the window;
   dragging to the top edge maximizes (Aero Snap); dragging a maximized
   window restores it; Win+← snaps to the left half; a double click toggles
   maximize. The title bar's own buttons (back/forward) still work.
@@ -668,7 +660,7 @@ Verified with injected mouse input on this VM (`m7-*.png`):
 - Reported upstream: longbridge/nsh#2143 (`drag_area` should let caption
   presses through on Windows).
 
-## Milestone 8 — package — DONE (CI zip; the crash fix is still upstream)
+## Milestone 8 — package — DONE
 
 - `desktop-ports.yml` (windows-latest) now uploads `rustflix-windows-x86_64.zip`:
   `rustflix.exe` (GUI subsystem, release), `nsh/` (the TSX bundle) and
@@ -680,13 +672,9 @@ Verified with injected mouse input on this VM (`m7-*.png`):
   and the zip expanded run as is; no console window; WebView2's profile goes
   to `%LOCALAPPDATA%\com.hexuria.rustflix\WebView2`, nothing is written beside
   the executable.
-- **The CI-built zip still crashes at startup** (`RefCell already borrowed`,
-  exit 0xC0000409 — the windows-latest smoke step shows it) until a released
-  gpui-fast contains longbridge/gpui-fast#145 or a released nsh contains
-  longbridge/nsh#2116; every local verification above used gpui-fast 0.1.10
-  with #145 backported (`C:\work\.cargo\config.toml`, outside the repo). Once
-  either ships, the version bump goes in `Cargo.toml`/`Cargo.lock` (nsh 0.5.x
-  needs gpui-fast ≥ 0.1.13; that migration is its own change).
+- The CI-built zip starts since `d38995a` (nsh 0.5.1 with longbridge/nsh#2116,
+  gpui-fast 0.1.16): see "Upstream dependency (startup crash)" above. The
+  verifications above this note used gpui-fast 0.1.10 with #145 backported.
 - No extra DLLs: Media Foundation and WebView2 are Windows'.
 
 ## Performance on a machine without a GPU (2026-11-16)
@@ -762,11 +750,10 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   `sys.nativeVideo {caption}`. Verified end to end: cues given to the app's
   caption component show in that window and change with each cue while the
   picture stays in its window (67 % app CPU).
-  Known, upstream: gpui-fast 0.1.10 panics (`RefCell already borrowed`,
-  `async_context.rs`) when a hit-test message reaches it inside WebView2's
-  creation pump; showing or hiding a window under the pointer sends one,
-  so this path can meet it while a hidden web view is being made (seen
-  once). gpui-fast main defers those callbacks.
+  Known, upstream (until `d38995a`): gpui-fast 0.1.10 panicked (`RefCell
+  already borrowed`, `async_context.rs`) when a hit-test message reached it
+  inside WebView2's creation pump (seen once). gpui-fast 0.1.16 defers those
+  callbacks (#146), and nsh#2116 builds web views outside the pump.
   Limits: controls put the picture back on the GPUI path while they show; a
   cropped picture (`fit: cover`) stays on it; a line mixing italic and
   upright text is drawn upright.

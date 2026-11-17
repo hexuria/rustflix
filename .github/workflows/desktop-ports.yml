@@ -140,8 +140,9 @@ jobs:
           cp packaging/windows/README.txt dist/rustflix-windows-x86_64/
           find dist -maxdepth 3 | sort
 
+      # Fails the job when the app exits within 15 s (it crashed at start
+      # until nsh#2116 was carried, d38995a).
       - name: Smoke test (15 s)
-        continue-on-error: true
         shell: pwsh
         run: |
           $dir = "dist/rustflix-windows-x86_64"

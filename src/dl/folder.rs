@@ -38,9 +38,18 @@ fn real(path: &Path) -> Option<PathBuf> {
 pub(crate) fn validate(path: &str, current: &Path, forbidden: &[PathBuf], records: &[PathBuf]) -> Result<PathBuf, String> {
     let p = Path::new(path.trim());
     if path.trim().is_empty() || !p.is_absolute() {
+        #[cfg(windows)]
+        return Err("Choose a full folder path (like C:\\Users\\you\\Videos).".into());
+        #[cfg(not(windows))]
         return Err("Choose a full folder path (starting with / or ~).".into());
     }
-    if p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+    // In a verbatim Windows path (`\\?\C:\…`) `/` is no separator: `a/../b`
+    // is then one component, which `PathBuf::push` later resolves. On
+    // other systems no component holds a `/`.
+    let dotted = |n: &std::ffi::OsStr| n.as_encoded_bytes().split(|b| *b == b'/').any(|s| s == b".." || s == b".");
+    if p.components().any(|c| {
+        matches!(c, Component::ParentDir | Component::CurDir) || matches!(c, Component::Normal(n) if dotted(n))
+    }) {
         return Err("The folder path may not contain \".\" or \"..\".".into());
     }
     if p.parent().is_none() {
@@ -72,6 +81,10 @@ pub(crate) fn validate(path: &str, current: &Path, forbidden: &[PathBuf], record
     let probe = r.join(format!(".rustflix-write-test-{}", std::process::id()));
     fs::write(&probe, b"x").map_err(|e| format!("Can't write to {}: {e}", r.display()))?;
     let _ = fs::remove_file(&probe);
+    // Windows: `canonicalize` answers verbatim paths (`\\?\C:\…`); the folder
+    // is stored, shown and handed to the shell in its plain form.
+    #[cfg(windows)]
+    let r = crate::win::shell::plain(&r);
     Ok(r)
 }
 
@@ -173,17 +186,27 @@ mod tests {
         let root = temp("validate");
         let cur = root.join("cur");
         fs::create_dir_all(cur.join("Movie")).unwrap();
-        let forbidden: Vec<PathBuf> = SYSTEM.iter().map(PathBuf::from).collect();
         let none: Vec<PathBuf> = vec![];
         let recs = vec![cur.join("Movie")];
         assert!(validate("relative/path", &cur, &none, &recs).is_err());
         assert!(validate("", &cur, &none, &recs).is_err());
         assert!(validate("/", &cur, &none, &recs).is_err());
         assert!(validate(&format!("{}/a/../b", root.display()), &cur, &none, &recs).is_err());
-        assert!(validate("/System/Library/x", &cur, &forbidden, &recs).unwrap_err().contains("system"));
-        assert!(validate("/usr/local/dl", &cur, &forbidden, &recs).is_err());
-        // The temp dir is under /private/var: forbidden with the system list.
-        assert!(validate(&root.join("new").to_string_lossy(), &cur, &forbidden, &recs).is_err());
+        #[cfg(unix)]
+        {
+            let forbidden: Vec<PathBuf> = SYSTEM.iter().map(PathBuf::from).collect();
+            assert!(validate("/System/Library/x", &cur, &forbidden, &recs).unwrap_err().contains("system"));
+            assert!(validate("/usr/local/dl", &cur, &forbidden, &recs).is_err());
+            // The temp dir is under /private/var: forbidden with the system list.
+            assert!(validate(&root.join("new").to_string_lossy(), &cur, &forbidden, &recs).is_err());
+        }
+        #[cfg(windows)]
+        {
+            let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            let forbidden = vec![PathBuf::from(&windir)];
+            assert!(validate(&format!(r"{windir}\x"), &cur, &forbidden, &recs).unwrap_err().contains("system"));
+            assert!(validate(&format!(r"{}\a\..\b", root.display()), &cur, &none, &recs).is_err());
+        }
         assert!(validate(&cur.to_string_lossy(), &cur, &none, &recs).unwrap_err().contains("already"));
         assert!(validate(&cur.join("Movie/x").to_string_lossy(), &cur, &none, &recs).is_err());
         fs::write(root.join("file"), b"x").unwrap();

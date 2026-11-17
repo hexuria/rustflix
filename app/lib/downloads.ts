@@ -22,7 +22,7 @@
 // after boot (and removed); while armed, every state/source/message/
 // progress change writes a snapshot to `rustflix.dltest.result`.
 
-import { computed, host, signal, Storage, untracked } from "nsh";
+import { computed, host, signal, Storage, untracked, platform } from "nsh";
 import type { Accessor } from "nsh";
 import process from "process";
 import {
@@ -1326,14 +1326,34 @@ function hostCall(name: string, data: Record<string, unknown>): Promise<unknown>
   return host.call(name, data);
 }
 
+/** Windows paths (drive or UNC, `\\` or `/` separators): the folder checks
+ * below are written for Unix paths otherwise. */
+const WIN_PATHS = (() => {
+  try {
+    return platform.os === "windows";
+  } catch {
+    return false;
+  }
+})();
+
 function expandHome(p: string): string {
-  if (p === "~" || p.startsWith("~/")) return `${homeDir()}${p.slice(1)}`;
+  if (p === "~" || p.startsWith("~/") || (WIN_PATHS && p.startsWith("~\\"))) return `${homeDir()}${p.slice(1)}`;
   return p;
 }
 
-/** A folder path without trailing slashes ("/" stays). */
+/** A folder path without trailing slashes ("/" stays; Windows: "C:\\" stays). */
 function normDir(p: string): string {
+  if (WIN_PATHS) {
+    const s = p.replace(/[\\/]+$/, "");
+    return /^[a-zA-Z]:$/.test(s) ? `${s}\\` : s;
+  }
   return p.replace(/\/+$/, "") || "/";
+}
+
+/** A full path on this system (Windows: a drive or a UNC share). */
+function isFullPath(p: string): boolean {
+  if (WIN_PATHS) return /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(p);
+  return p.startsWith("/");
 }
 
 function formatSize(n: number): string {
@@ -1399,8 +1419,10 @@ export async function changeDownloadDir(path: string): Promise<{ ok: boolean; mo
   const raw = String(path ?? "").trim();
   if (!raw) return no("Choose a folder.");
   const p = normDir(expandHome(raw));
-  if (!p.startsWith("/")) return no("Choose a full folder path (starting with / or ~).");
-  if (/(^|\/)\.\.?(\/|$)/.test(p)) return no('The folder path may not contain "." or "..".');
+  if (!isFullPath(p)) {
+    return no(WIN_PATHS ? "Choose a full folder path (like C:\\Users\\you\\Videos)." : "Choose a full folder path (starting with / or ~).");
+  }
+  if ((WIN_PATHS ? /(^|[\\/])\.\.?([\\/]|$)/ : /(^|\/)\.\.?(\/|$)/).test(p)) return no('The folder path may not contain "." or "..".');
   if (p === untracked(downloadDir)) return no("That's already the download folder.");
   if (dirChanging) return no("The download folder is already being moved.");
   if (!untracked(canChangeDownloadDir)) {

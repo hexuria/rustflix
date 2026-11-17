@@ -4,7 +4,7 @@ name: Desktop ports
 
 on:
   push:
-    branches: [spike/desktop-ports, port/linux]
+    branches: [spike/desktop-ports, port/linux, port/windows-v2]
   workflow_dispatch:
 
 permissions:
@@ -137,10 +137,12 @@ jobs:
           mkdir -p dist/rustflix-windows-x86_64
           cp target/release/rustflix.exe dist/rustflix-windows-x86_64/
           cp -R "$(dirname "$nshc")" dist/rustflix-windows-x86_64/nsh
+          cp packaging/windows/README.txt dist/rustflix-windows-x86_64/
           find dist -maxdepth 3 | sort
 
+      # Fails the job when the app exits within 15 s (it crashed at start
+      # until nsh#2116 was carried, d38995a).
       - name: Smoke test (15 s)
-        continue-on-error: true
         shell: pwsh
         run: |
           $dir = "dist/rustflix-windows-x86_64"
@@ -155,9 +157,16 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/smoke.err" -Tail 60
           Stop-Process -Id $p.Id -Force
 
+      # The runnable folder as one .zip (no installer, not signed yet); the
+      # README inside names what Windows must have (WebView2 runtime, Media
+      # Foundation).
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist/rustflix-windows-x86_64 -DestinationPath rustflix-windows-x86_64.zip -Force
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rustflix-windows-x86_64
-          path: dist/rustflix-windows-x86_64
+          path: rustflix-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 7

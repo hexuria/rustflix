@@ -41,6 +41,7 @@
     "openUrl": {
       "schemes": ["https"]
     },
+    "statusBar": true,
     "host": ["dl.*", "sys.*", "cache.*", "fs.*", "perf.*"],
     "process": {
       "execute": ["/bin/sh", "cmd.exe", "python3", "/usr/bin/python3", "python"]

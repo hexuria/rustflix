@@ -68,11 +68,15 @@ export interface NativeVideoEvents {
   seeked: { target: number; time: number | null; finished: boolean; ms: number };
   end: Record<string, never>;
   error: { message: string; code: string; fatal: boolean };
+  /** Windows: whether the player shows the app's caption itself now (in a
+   * window of its own over the picture's: see setNativeCaption). The app
+   * draws none of its own meanwhile, or both would show. */
+  caption: { shown: boolean };
 }
 
 export const NativeVideo = nativeComponent<NativeVideoProps, NativeVideoEvents>("rustflix.video", {
   props: ["src", "paused", "muted", "volume", "rate", "frame", "startAt", "fit", "maxResolution", "nowPlaying"],
-  events: ["ready", "load", "frame", "progress", "buffer", "seeked", "end", "error", "tracks", "rate", "pip", "cues"],
+  events: ["ready", "load", "frame", "progress", "buffer", "seeked", "end", "error", "tracks", "rate", "pip", "cues", "caption"],
 });
 
 /** What `ref` of a NativeVideo gets (`ref.command`). */
@@ -104,6 +108,10 @@ export async function controlVideo(
      * the `frame` prop arrives with a drawn frame). */
     frame?: { width: number; height: number };
     nowPlaying?: { title: string; subtitle?: string; artwork?: string } | null;
+    /** Windows: nothing is drawn over the picture (see setNativeUncovered). */
+    uncovered?: boolean;
+    /** Windows: the caption on screen (see setNativeCaption). */
+    caption?: { lines: { text: string; italic: boolean }[]; font: number; bottom: number } | null;
   },
 ): Promise<boolean> {
   return !!(await call<{ ok: boolean }>("sys.nativeVideo", { handle, ...data }))?.ok;

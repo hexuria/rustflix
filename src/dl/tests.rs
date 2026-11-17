@@ -208,11 +208,22 @@ struct Rig {
     trashed: Arc<Mutex<Vec<PathBuf>>>,
 }
 
+/// `p` (written with `/`) with this system's separator; the same string on
+/// Unix.
+fn native(p: &str) -> String {
+    p.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rustflix-dl-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::canonicalize(&dir).unwrap()
+    let dir = fs::canonicalize(&dir).unwrap();
+    // Windows: canonical paths are verbatim; the download folder is kept in
+    // its plain form (`folder::validate`).
+    #[cfg(windows)]
+    let dir = crate::win::shell::plain(&dir);
+    dir
 }
 
 fn rig_in(root: &Path, force_copy: bool) -> Rig {
@@ -221,8 +232,8 @@ fn rig_in(root: &Path, force_copy: bool) -> Rig {
     let trashed = Arc::new(Mutex::new(Vec::new()));
     let (ev, fr, tr) = (events.clone(), free.clone(), trashed.clone());
     let cfg = Config {
-        store: root.join("data/rustflix-downloads.json"),
-        default_dir: root.join("Downloads/rustflix"),
+        store: root.join(native("data/rustflix-downloads.json")),
+        default_dir: root.join(native("Downloads/rustflix")),
         home: root.to_string_lossy().into_owned(),
         forbidden: vec![root.join("forbidden")],
         min_free: MIN_FREE,
@@ -320,7 +331,7 @@ fn hls_end_to_end_with_local_playback() {
     assert_eq!(rec["type"], "tv");
     assert_eq!(rec["episode"], 2);
     let folder = r.folder(id);
-    assert_eq!(folder, r.root.join("Downloads/rustflix/Show S1E2"));
+    assert_eq!(folder, r.root.join(native("Downloads/rustflix/Show S1E2")));
     assert_eq!(rec["file"], folder.join("index.m3u8").to_string_lossy().as_ref());
     let names = names_of(&folder);
     assert!(!names.contains(&".manifest.json".to_owned()), "{names:?}");
@@ -347,7 +358,7 @@ fn hls_end_to_end_with_local_playback() {
     assert_eq!(o.hits("/v/hi/seg2.ts"), 3);
     assert_eq!(o.hits("/v/low.m3u8"), 0);
     // Headers are stripped once done; the record persisted.
-    let saved = store::load(&r.root.join("data/rustflix-downloads.json"));
+    let saved = store::load(&r.root.join(native("data/rustflix-downloads.json")));
     let srec = saved.records.iter().find(|x| x.id == id).unwrap();
     assert!(srec.headers.is_none());
     assert_eq!(srec.status, "done");
@@ -576,7 +587,7 @@ fn launch_reconciliation() {
     let root = temp("reconcile");
     let o = Origin::start();
     o.set("/ok.mp4", Route { body: vec![1u8; 1000], ranges: true, ..Default::default() });
-    let dir = root.join("Downloads/rustflix");
+    let dir = root.join(native("Downloads/rustflix"));
     let rec = |id: u64, url: String, folder: &str| store::Record {
         id,
         name: folder.into(),
@@ -599,7 +610,7 @@ fn launch_reconciliation() {
             store::Record { id: 5, status: "done".into(), headers: Some(BTreeMap::new()), folder: dir.join("Done"), ..Default::default() },
         ],
     };
-    store::save(&root.join("data/rustflix-downloads.json"), &saved).unwrap();
+    store::save(&root.join(native("data/rustflix-downloads.json")), &saved).unwrap();
     let r = rig_in(&root, false);
     let a = r.rec(1);
     assert_eq!(a["status"], "error");
@@ -615,7 +626,7 @@ fn launch_reconciliation() {
     assert_eq!(opts["configured"], false);
     drop(r);
     // Done records lost their headers on load.
-    let s = store::load(&root.join("data/rustflix-downloads.json"));
+    let s = store::load(&root.join(native("data/rustflix-downloads.json")));
     assert!(s.records.iter().find(|x| x.id == 5).unwrap().headers.is_none());
     fs::remove_dir_all(&root).unwrap();
 }
@@ -629,7 +640,7 @@ fn shutdown_leaves_running_records_to_resume() {
     let id = r.start(json!({ "url": o.url("/slow.mp4"), "name": "Slow" }))["id"].as_u64().unwrap();
     std::thread::sleep(Duration::from_millis(100));
     r.m.shutdown(Duration::from_secs(2));
-    let s = store::load(&root.join("data/rustflix-downloads.json"));
+    let s = store::load(&root.join(native("data/rustflix-downloads.json")));
     assert_eq!(s.records[0].status, "running", "resumed on the next launch");
     drop(r);
     o.edit("/slow.mp4", |r| {
@@ -658,10 +669,10 @@ fn changing_the_download_folder_moves_every_download() {
         let a = done_file_record(&r, &o, "Alpha");
         let b = done_file_record(&r, &o, "Beta");
         let old_a = r.folder(a);
-        let new_dir = root.join("Elsewhere/Movies");
+        let new_dir = root.join(native("Elsewhere/Movies"));
         // A different "Beta" already waits there: Beta stays behind.
         fs::create_dir_all(new_dir.join("Beta")).unwrap();
-        fs::write(new_dir.join("Beta/theirs.txt"), b"keep").unwrap();
+        fs::write(new_dir.join(native("Beta/theirs.txt")), b"keep").unwrap();
         r.events.lock().unwrap().clear();
         let res = r.m.options(&json!({ "dir": new_dir.to_string_lossy() }));
         assert_eq!(res["ok"], true, "{res}");
@@ -670,14 +681,14 @@ fn changing_the_download_folder_moves_every_download() {
         assert_eq!(res["dir"], new_dir.to_string_lossy().as_ref());
         assert!(!old_a.exists());
         assert_eq!(r.folder(a), new_dir.join("Alpha"));
-        assert!(new_dir.join("Alpha/Alpha.mp4").is_file());
-        assert_eq!(r.rec(a)["file"], new_dir.join("Alpha/Alpha.mp4").to_string_lossy().as_ref());
-        assert_eq!(r.folder(b), root.join("Downloads/rustflix/Beta"), "kept where it was");
-        assert!(root.join("Downloads/rustflix/Beta/Beta.mp4").is_file());
-        assert_eq!(fs::read(new_dir.join("Beta/theirs.txt")).unwrap(), b"keep");
+        assert!(new_dir.join(native("Alpha/Alpha.mp4")).is_file());
+        assert_eq!(r.rec(a)["file"], new_dir.join(native("Alpha/Alpha.mp4")).to_string_lossy().as_ref());
+        assert_eq!(r.folder(b), root.join(native("Downloads/rustflix/Beta")), "kept where it was");
+        assert!(root.join(native("Downloads/rustflix/Beta/Beta.mp4")).is_file());
+        assert_eq!(fs::read(new_dir.join(native("Beta/theirs.txt"))).unwrap(), b"keep");
         assert_eq!(r.events.lock().unwrap().len(), 1, "an event for the moved record");
         // Records and the folder were saved together.
-        let s = store::load(&root.join("data/rustflix-downloads.json"));
+        let s = store::load(&root.join(native("data/rustflix-downloads.json")));
         assert_eq!(s.dir, new_dir.to_string_lossy());
         assert!(s.configured);
         assert_eq!(s.records.iter().find(|x| x.id == a).unwrap().folder, new_dir.join("Alpha"));
@@ -688,13 +699,13 @@ fn changing_the_download_folder_moves_every_download() {
         assert!(r.m.space()["used"].as_u64().unwrap() >= 3 * 2048);
         // Refusals: the same folder, a forbidden one, a relative one.
         assert!(r.m.options(&json!({ "dir": new_dir.to_string_lossy() })).get("error").is_some());
-        assert_eq!(r.m.options(&json!({ "dir": root.join("forbidden/x").to_string_lossy() }))["ok"], false);
+        assert_eq!(r.m.options(&json!({ "dir": root.join(native("forbidden/x")).to_string_lossy() }))["ok"], false);
         assert_eq!(r.m.options(&json!({ "dir": "relative" }))["ok"], false);
         // `~` is the home directory.
         let res = r.m.options(&json!({ "dir": "~/Third" }));
         assert_eq!(res["ok"], true, "{res}");
-        assert_eq!(r.folder(a), root.join("Third/Alpha"));
-        assert_eq!(r.folder(b), root.join("Third/Beta"), "the one left behind follows now");
+        assert_eq!(r.folder(a), root.join(native("Third/Alpha")));
+        assert_eq!(r.folder(b), root.join(native("Third/Beta")), "the one left behind follows now");
         drop(r);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -714,7 +725,7 @@ fn no_folder_change_while_downloading() {
     let res = r.m.options(&json!({ "dir": r.root.join("other").to_string_lossy() }));
     assert_eq!(res["ok"], true, "{res}");
     assert_eq!(res["moved"], 1);
-    assert_eq!(r.folder(id), r.root.join("other/Busy"));
+    assert_eq!(r.folder(id), r.root.join(native("other/Busy")));
     // Its resume continues in the new place.
     o.edit("/busy.mp4", |x| {
         x.always = None;
@@ -723,7 +734,7 @@ fn no_folder_change_while_downloading() {
     assert_eq!(r.start(json!({ "id": id }))["resumed"], true);
     let rec = r.settle(id, 10);
     assert_eq!(rec["status"], "done");
-    assert!(rec["file"].as_str().unwrap().starts_with(&*r.root.join("other/Busy").to_string_lossy()));
+    assert!(rec["file"].as_str().unwrap().starts_with(&*r.root.join(native("other/Busy")).to_string_lossy()));
     fs::remove_dir_all(&r.root).unwrap();
 }
 
@@ -756,7 +767,7 @@ fn removing_an_unfinished_download_trashes_its_partial_files() {
 #[test]
 fn adopting_vid_dl_era_files() {
     let r = rig("adopt");
-    let dir = r.root.join("Downloads/rustflix");
+    let dir = r.root.join(native("Downloads/rustflix"));
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("Old Movie.mp4"), vec![9u8; 4096]).unwrap();
     fs::write(dir.join(".rustflix-subs-4.json"), br#"{"v":1,"lang":"en","cues":[]}"#).unwrap();
@@ -773,7 +784,7 @@ fn adopting_vid_dl_era_files() {
     assert_eq!(rec["status"], "done");
     assert_eq!(rec["createdAt"], 1234.0);
     assert_eq!(rec["mediaId"], 40);
-    assert_eq!(rec["file"], dir.join("Old Movie/Old Movie.mp4").to_string_lossy().as_ref());
+    assert_eq!(rec["file"], dir.join(native("Old Movie/Old Movie.mp4")).to_string_lossy().as_ref());
     assert_eq!(res["subs"], r#"{"v":1,"lang":"en","cues":[]}"#);
     assert!(!dir.join(".rustflix-subs-4.json").exists() && !dir.join(".rustflix-player-4.html").exists());
     assert_eq!(names_of(&dir), ["Old Movie"]);

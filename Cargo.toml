@@ -10,12 +10,12 @@ publish = false
 [workspace]
 
 [dependencies]
-nsh-platform-gpui = { version = "0.4.0", default-features = false, features = ["js", "webview", "runtime-shaders"] }
+nsh-platform-gpui = { version = "0.5.1", default-features = false, features = ["js", "webview", "runtime-shaders"] }
 env_logger = "0.11"
 log = "0.4"
 # The `nsh/host` channel (`HostChannel`) behind the app's `cache.*` calls;
 # the same nsh-engine nsh-platform-gpui builds on.
-nsh-engine = { version = "0.4.0", default-features = false }
+nsh-engine = { version = "0.5.1", default-features = false }
 serde_json = "1"
 # The built-in downloader (`src/dl`): HTTP with the same ureq (and its
 # default rustls + gzip features) nsh-engine already builds, URL
@@ -26,7 +26,7 @@ serde = { version = "1", features = ["derive"] }
 # The FPS monitor's window root (src/perf.rs): GPUI's application, the
 # same gpui-fast-platform nsh-platform-gpui builds on, and the channel that
 # wakes it (both already in the tree).
-gpui_platform = { package = "gpui-fast-platform", version = "0.1.10", default-features = false }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.16", default-features = false }
 async-channel = "2"
 # `fs.space` (statvfs) for the download folder's volume.
 [target.'cfg(unix)'.dependencies]
@@ -49,6 +49,46 @@ smallvec = "1.16.5"
 gtk = "0.18"
 webkit2gtk = { version = "2.0.1", features = ["v2_40"] }
 
+# The Windows player (src/player/win): Media Foundation's media engine
+# decodes (part of Windows, nothing to install); frames go through a D3D11
+# texture into GPUI's image atlas; the shell calls (`fs.*`: free space,
+# the Recycle Bin, Explorer) are src/win/shell.rs. `windows` is the version
+# gpui-fast-windows already builds; `image`/`smallvec` are in the tree
+# through gpui-fast.
+[target.'cfg(target_os = "windows")'.dependencies]
+image = "0.25.10"
+smallvec = "1.16.5"
+windows-core = "0.62"
+# The WebView2 web views (src/win/webview.rs): the bindings wry builds on,
+# with the `windows` crates of their own version (all already in the tree).
+webview2-com = "0.38"
+# The content rules' URL filters (already in the tree).
+regex = "1.13"
+windows-61 = { package = "windows", version = "0.61", features = ["Win32_Foundation"] }
+windows-core61 = { package = "windows-core", version = "0.61" }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_MediaFoundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # `cache.clear` of web/site data through the web views' WKWebsiteDataStore
 # (all already in the tree through wry).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -64,10 +104,10 @@ objc2-core-video = { version = "0.3", default-features = false, features = ["CVB
 
 # `build.rs` bundles and compiles `app/` as `nsh build` does.
 [build-dependencies]
-nsh-bundler = { version = "0.4.0", features = ["bundle"] }
-nsh-core = { version = "0.4.0" }
-nsh-js = { version = "0.4.0" }
-nsh-base = { version = "0.4.0" }
+nsh-bundler = { version = "0.5.1", features = ["bundle"] }
+nsh-core = { version = "0.5.1" }
+nsh-js = { version = "0.5.1" }
+nsh-base = { version = "0.5.1" }
 serde_json = "1"
 # rolldown 1.2.13 (pinned by nsh-bundler) semver-allows rolldown_std_utils
 # 1.3.x, which broke its API; pin the matching version.
@@ -88,13 +128,18 @@ debug = "line-tables-only"
 strip = "none"
 
 
-# Linux draws macOS-style traffic lights (left side) for its client-side
-# window decorations — a patch on top of the published 0.4.0 until it
-# lands upstream in longbridge/nsh (branch linux-traffic-lights).
+# nsh 0.5.1 with what it lacks, from hexuria/nsh branch rustflix-0.5.1 (on
+# the v0.5.1 tag): Linux draws macOS-style traffic lights for its
+# client-side window decorations; Windows builds web views outside GPUI's
+# app update (longbridge/nsh#2116, merged after 0.5.1: a web view built in
+# a prepaint crashed the app at startup); and it builds against gpui-fast
+# 0.1.16, which implements IntoElement for every Element (0.5.1's own
+# impls conflict with it). Back to the published crates once a release
+# has all three.
 [patch.crates-io]
-nsh-platform-gpui = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
-nsh-engine = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
-nsh-bundler = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
-nsh-core = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
-nsh-js = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
-nsh-base = { git = "https://github.com/hexuria/nsh", branch = "linux-traffic-lights" }
+nsh-platform-gpui = { git = "https://github.com/hexuria/nsh", branch = "rustflix-0.5.1" }
+nsh-engine = { git = "https://github.com/hexuria/nsh", branch = "rustflix-0.5.1" }
+nsh-bundler = { git = "https://github.com/hexuria/nsh", branch = "rustflix-0.5.1" }
+nsh-core = { git = "https://github.com/hexuria/nsh", branch = "rustflix-0.5.1" }
+nsh-js = { git = "https://github.com/hexuria/nsh", branch = "rustflix-0.5.1" }
+nsh-base = { git = "https://github.com/hexuria/nsh", branch = "rustflix-0.5.1" }

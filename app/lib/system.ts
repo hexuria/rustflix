@@ -65,8 +65,10 @@ export function restoreBrightness(): Promise<number> {
 
 const MAC_HOST = (() => {
   try {
-    // Linux implements sys.pickFolder/sys.webBackground through GTK too.
-    return (platform.os === "macos" || platform.os === "linux") && host.available();
+    // Linux implements sys.pickFolder/sys.webBackground through GTK too;
+    // Windows sys.pickFolder/focusContent/webBackground through the shell
+    // and WebView2 (src/win).
+    return (platform.os === "macos" || platform.os === "linux" || platform.os === "windows") && host.available();
   } catch {
     return false;
   }
@@ -83,7 +85,7 @@ async function macCall<T>(name: string, args?: Record<string, unknown>): Promise
   }
 }
 
-/** Whether `sys.pickFolder` can be asked (macOS with the op not known missing). */
+/** Whether `sys.pickFolder` can be asked (macOS, Linux, Windows; the op not known missing). */
 export function canPickFolder(): boolean {
   return MAC_HOST && !missing.has("sys.pickFolder");
 }
@@ -174,3 +176,9 @@ export function setPlayerWindow(on: boolean, pageTouches = false): void {
   if (!on && untracked(playerFullscreen)) queueMicrotask(() => playerFullscreen.set(false));
   void host.call("sys.playerWindow", { on, pageTouches, fullscreen }).catch(() => {});
 }
+
+/** Whether a toast is on screen (App.tsx's toast layer). Windows: the
+ * player counts it as drawn over the picture, which on a machine without
+ * a GPU is otherwise in a window above the app's own drawing
+ * (src/player/win/direct.rs). */
+export const toastsShown = signal(false);

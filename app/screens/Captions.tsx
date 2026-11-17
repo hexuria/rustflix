@@ -11,9 +11,9 @@
 // at the playback rate on a 100 ms tick (never more than 0.5 s ahead), so
 // cues change on time.
 
-import { cleanup, computed, effect, signal, Text, untracked, View } from "nsh";
+import { cleanup, computed, effect, platform, signal, Text, untracked, View } from "nsh";
 import { mediaPaused, mediaRate, playerPhase, position, subtitleOffset } from "../lib/player";
-import { captionConfig, embeddedCues, nativeCaptions } from "../lib/playback/nativeBackend";
+import { captionConfig, embeddedCues, nativeCaptions, nativeCaptionShown, setNativeCaption } from "../lib/playback/nativeBackend";
 import { nativeInfo } from "../lib/playback/caps";
 import { settings } from "../lib/store";
 
@@ -127,8 +127,31 @@ export function Captions(props: { mobile: boolean; size: () => { w: number; h: n
     return out;
   });
 
+  // Windows: the player draws the caption itself while the picture is in
+  // a window of its own, above this view (lib/playback/nativeBackend.ts).
+  if (platform.os === "windows") {
+    effect(() => {
+      const ls = lines();
+      const { fs, bottom } = layout();
+      const caption = ls.length
+        ? {
+            lines: ls.map((l) => ({
+              text: l.segs.map((s) => s.text).join(""),
+              italic: l.segs.length > 0 && l.segs.every((s) => s.italic),
+            })),
+            font: fs,
+            bottom,
+          }
+        : null;
+      untracked(() => setNativeCaption(caption));
+    });
+    cleanup(() => setNativeCaption(null));
+  }
+
+  // Windows: none of its own while the player shows it (its `caption`
+  // event), which it keeps being given above.
   return (
-    <If when={lines().length > 0}>
+    <If when={lines().length > 0 && !(platform.os === "windows" && nativeCaptionShown())}>
       <View
         class="pointer-events-none absolute items-center"
         style={{ left: "10%", right: "10%", bottom: layout().bottom }}

@@ -149,7 +149,18 @@ impl Manager {
             next_id = next_id.max(r.id + 1);
             records.insert(r.id, r);
         }
-        let dir = if saved.dir.is_empty() { cfg.default_dir.clone() } else { PathBuf::from(&saved.dir) };
+        // A relative folder is never a valid download folder (`folder::validate`
+        // wants an absolute one); one stored by a build that had no home
+        // folder to start from falls back to the default.
+        let dir = if saved.dir.is_empty() || !Path::new(&saved.dir).is_absolute() {
+            cfg.default_dir.clone()
+        } else {
+            PathBuf::from(&saved.dir)
+        };
+        // Windows: a verbatim folder (`\\?\C:\…`) stored by an earlier build,
+        // in its plain form.
+        #[cfg(windows)]
+        let dir = crate::win::shell::plain(&dir);
         let m = Arc::new(Manager {
             st: Mutex::new(State {
                 records,
@@ -920,12 +931,43 @@ fn forbidden(home: &str) -> Vec<PathBuf> {
     {
         out.push(bundle.to_path_buf());
     }
+    // Windows: the system and program folders, the per-user app data
+    // (`~/Library`'s counterpart), the Recycle Bin, and the folder the app
+    // runs from.
+    #[cfg(windows)]
+    {
+        for var in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
+            if let Some(v) = std::env::var_os(var) {
+                out.push(PathBuf::from(v));
+            }
+        }
+        if !home.is_empty() {
+            out.push(Path::new(home).join("AppData"));
+        }
+        if let Some(drive) = std::env::var_os("SystemDrive") {
+            out.push(Path::new(&drive).join("\\$Recycle.Bin"));
+        }
+        if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+            out.push(dir);
+        }
+    }
     out
+}
+
+/// The user's home folder: `HOME`; on Windows, where GUI programs have no
+/// `HOME`, the profile folder (`USERPROFILE`).
+fn home_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    #[cfg(windows)]
+    if home.is_empty() {
+        return std::env::var("USERPROFILE").unwrap_or_default();
+    }
+    home
 }
 
 /// Registers the `dl.*` handlers on `host` for app `app_id`.
 pub(crate) fn register(host: &HostChannel, app_id: &str) -> Arc<Manager> {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home_dir();
     let data = nsh_engine::data_dir()
         .map(|d| d.join(nsh_engine::app_dir_name(Some(app_id))))
         .unwrap_or_else(|| std::env::temp_dir().join("rustflix"));

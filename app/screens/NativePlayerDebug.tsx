@@ -6,7 +6,9 @@
 // Runs only when Storage `rustflix.nativeplayer` is "1" AND Storage
 // `rustflix.nativetest` holds a request (JSON, removed when read):
 //   {"type":"movie","id":550,"source":"vidfast"}
-//   (+ optional "season", "episode", "lang", "holdMs": how long the screen
+//   (+ optional "season", "episode", "lang", "startDelayMs": a wait before
+//   anything starts (measurements after the first screen settled),
+//   "holdMs": how long the screen
 //   stays up after the run for a real click on the press target, default
 //   60000; "rect": {x, y, width, height} of the picture in window points,
 //   default 40, 80, 960×540 — e.g. the whole window to measure paint cost;
@@ -152,7 +154,7 @@ export async function runNativeTest() {
     await save();
     return;
   }
-  let req: ResolveRequest & { holdMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; playdownload?: number; failcheck?: boolean; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
+  let req: ResolveRequest & { holdMs?: number; startDelayMs?: number; rect?: Partial<typeof DEFAULT_RECT>; download?: number; playdownload?: number; failcheck?: boolean; stream?: { url: string; kind?: string; headers?: Record<string, string> } };
   try {
     req = JSON.parse(raw);
   } catch (e) {
@@ -162,6 +164,12 @@ export async function runNativeTest() {
     return;
   }
   result.request = req;
+  // "startDelayMs": wait before starting, so a measurement does not overlap
+  // the first screen's loading.
+  if (typeof req.startDelayMs === "number" && req.startDelayMs > 0) {
+    step(`waiting ${req.startDelayMs} ms`);
+    await sleep(req.startDelayMs);
+  }
   if (typeof req.playdownload === "number") {
     // A finished download played through the real path — Downloads → Play
     // → the player route → lib/downloads `localPage` → the native player.

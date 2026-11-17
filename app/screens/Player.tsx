@@ -22,7 +22,7 @@ import {
   WebView,
 } from "nsh";
 import { Dialog, Slider } from "nsh/base";
-import { isAvailable as hasWindow, Window } from "nsh/desktop";
+import { currentWindow, isAvailable as hasWindow } from "nsh/desktop";
 import { exitPlayer, route } from "../lib/router";
 import {
   closePalette,
@@ -54,6 +54,8 @@ import {
   pipSupported,
   enterPip,
   playerPhase,
+  skipPill,
+  skipSegment,
   localPreparing,
   position,
   duration,
@@ -79,6 +81,7 @@ import {
   loadingArt,
   registerPlaybackHost,
   webPageUrl,
+  upNextCard,
 } from "../lib/player";
 import {
   NativeVideo,
@@ -86,13 +89,14 @@ import {
   nativeRateProp,
   nativeView,
   setNativeFrame,
+  setNativeUncovered,
   setNativeNowPlaying,
 } from "../lib/playback/nativeBackend";
 import { cancelResolve, resolveStream, warmResolver, type ResolveRequest } from "../lib/resolver";
 import { PLAYER_SOURCES } from "../lib/sources";
 import { motionReduced, settings } from "../lib/store";
 import { Captions } from "./Captions";
-import { focusContent, restoreBrightness, webBackground } from "../lib/system";
+import { focusContent, restoreBrightness, toastsShown, webBackground } from "../lib/system";
 import { Button } from "../lib/ui";
 import { closeEpisodes, EpisodePicker, openEpisodes, showEpisodes } from "./EpisodePicker";
 import { openSources, SourcePicker } from "./SourcePicker";
@@ -111,6 +115,7 @@ import {
   fmtTime,
   Glyph,
   hasNext,
+  controlsVisible,
   hideControls,
   isSeries,
   PhoneControls,
@@ -174,6 +179,34 @@ function NativeStage(props: { mobile: boolean }) {
     const np = nowPlaying();
     untracked(() => setNativeNowPlaying(np));
   });
+  // Windows only: whether anything is drawn over the picture. While
+  // nothing is, on a machine without a GPU, the player shows the picture
+  // in a child window above the app's drawing (src/player/win/direct.rs).
+  // Anything but plain playback counts as covered; captions do not (the
+  // player draws them over that window itself). The Up Next card and
+  // toasts show with the controls hidden, so they are named here too.
+  const covered = computed(() => {
+    if (platform.os !== "windows") return true;
+    return (
+      playerPhase() !== "playing" ||
+      controlsVisible() ||
+      playerPopup() !== null ||
+      skipSegment() !== null ||
+      skipPill() !== null ||
+      showPalette() ||
+      showSources() ||
+      showEpisodes() ||
+      upNextCard() !== null ||
+      toastsShown()
+    );
+  });
+  if (platform.os === "windows") {
+    effect(() => {
+      const clear = !covered();
+      untracked(() => setNativeUncovered(clear));
+    });
+    cleanup(() => setNativeUncovered(false));
+  }
   return (
     <View
       class="pointer-events-none absolute inset-0"
@@ -207,6 +240,7 @@ function NativeStage(props: { mobile: boolean }) {
         onPip={nativeHandlers.onPip}
         onEnd={nativeHandlers.onEnd}
         onError={nativeHandlers.onError}
+        onCaption={nativeHandlers.onCaption}
       />
       <Captions mobile={props.mobile} size={() => size()} />
     </View>
@@ -602,6 +636,8 @@ export function Player() {
   // controls over the video itself (the core turns them on; see
   // `pageControlsActive`). The GPUI bar below is the fallback while the
   // page has no overlay; both drive playback through the JS bridge.
+  // The app's window (nsh 0.5: a `WindowRef`, taken while rendering).
+  const appWindow = hasWindow ? currentWindow() : null;
   // Page buttons that need the app arrive through onPageAction.
   const offPageAction = onPageAction((a: PageAction) => {
     if (a === "escape" && closePlayerPopups()) return;
@@ -616,7 +652,7 @@ export function Player() {
     } else if (a === "fullscreen") {
       // The page's own fullscreen failed; asking the page again would
       // fail the same way (and loop), so the app window goes fullscreen.
-      if (hasWindow) Window.toggleFullScreen();
+      if (appWindow) appWindow.setMode(appWindow.state()?.mode === "fullScreen" ? "normal" : "fullScreen");
     }
   });
   cleanup(offPageAction);

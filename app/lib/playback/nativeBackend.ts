@@ -242,6 +242,9 @@ export const nativeHandlers = {
     const lines = Array.isArray(d?.lines) ? d.lines.filter((l) => typeof l === "string" && l) : [];
     embeddedCues.set(lines.length ? lines : null);
   },
+  onCaption(d: NativeEvents["caption"]) {
+    nativeCaptionShown.set(d?.shown === true);
+  },
   onPip(d: NativeEvents["pip"]) {
     pipPossible = !!d?.possible;
     pipActive = !!d?.active;
@@ -286,6 +289,7 @@ export const nativeView = {
     handle = null;
     nativePipActive.set(false);
     embeddedCues.set(null);
+    nativeCaptionShown.set(false);
     // The component leaves full screen as it goes (contract iOS notes).
     nativeFullscreenOn.set(false);
   },
@@ -308,6 +312,27 @@ export function setNativeFrame(width: number, height: number): void {
   if (lastFrame && lastFrame.width === w && lastFrame.height === h) return;
   lastFrame = { width: w, height: h };
   control({ frame: lastFrame });
+}
+
+/** Windows: whether nothing is drawn over the picture now (no controls,
+ * popup, captions…). On a machine without a GPU the player then shows the
+ * picture in a child window above the app's own drawing, far cheaper there
+ * (src/player/win/direct.rs). Through the handle: the desktop component's
+ * box is empty, so its props wait for a drawn frame. */
+export function setNativeUncovered(on: boolean): void {
+  control({ uncovered: on });
+}
+
+/** Windows: the caption on screen now (its lines, the font size and the
+ * distance from the picture area's bottom, in points), or null. While the
+ * picture is in its own window the player draws it there itself, over the
+ * picture (src/player/win/direct.rs), and tells the app (`nativeCaptionShown`),
+ * which then draws none of its own: where the app's would show (beside the
+ * picture, or across its edge) the two would double. */
+export function setNativeCaption(
+  caption: { lines: { text: string; italic: boolean }[]; font: number; bottom: number } | null,
+): void {
+  control({ caption });
 }
 
 let lastNowPlaying: { title: string; subtitle?: string; artwork?: string } | null = null;
@@ -390,6 +415,9 @@ const captions: CaptionSink = {
   },
 };
 
+/** Windows: the player shows the caption itself now (its `caption` event):
+ * screens/Captions.tsx draws none meanwhile. */
+export const nativeCaptionShown = signal(false);
 /** The external cues screens/Captions.tsx draws (null: none). */
 export const nativeCaptions = signal<{ id: string; cues: { s: number; e: number; t: string }[] } | null>(null);
 /** Caption size, timing offset (s) and lift (above the controls). */

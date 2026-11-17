@@ -293,9 +293,10 @@ the app stays up.
   **Traffic lights**: upstream draws GTK-style round buttons at the
   right; the user asked for the macOS look, so `Cargo.toml` patches
   the `nsh-*` crates to `github.com/hexuria/nsh` branch
-  `linux-traffic-lights` (commit `6fb68b1`, on top of the published
-  0.4.0 — drop the `[patch.crates-io]` section once it lands
-  upstream). Linux now draws close/minimize/zoom circles at the left
+  `rustflix-0.5.1` (the v0.5.1 tag with the traffic lights, longbridge/nsh#2116
+  and a fix to build against gpui-fast 0.1.16; it replaced the branch
+  `linux-traffic-lights` on 0.4.0 — drop the `[patch.crates-io]` section
+  once a release has all three). Linux now draws close/minimize/zoom circles at the left
   with hover glyphs and reports the left title-bar inset like macOS.
   They need a compositor and a window manager that lists
   `_GTK_FRAME_EXTENTS` in `_NET_SUPPORTED` (GNOME, KDE, Xfce do;
@@ -337,3 +338,428 @@ Results land in `rustflix.nativetest.result` (incremental). Requires
 Note for local runs: the app loads `nsh/` from beside the executable,
 so after `cargo build` copy `target/.../out/app/*` into the runnable
 folder's `nsh/` — the TSX bundle is not embedded in the binary.
+
+---
+
+# Windows (branch `port/windows-v2`)
+
+Written fresh on top of main `9f330db` (the old `port/windows` branch
+is not used; facts taken from it were re-checked here).
+
+**Test machine.** Windows Server 2022, 2 vCPUs, 8 GB, **no GPU**: Direct3D is
+the Microsoft Basic Render Driver (WARP, `d3d10warp.dll`). Sampled while
+scrolling Home: ~160 % of a core in WARP's thread-pool workers, ~3 % on the
+app's main thread. The UI is slow here because the picture is rasterised on
+the CPU, not because of app code. Real sources: the Vidfast source played in
+the web-page player on this machine (not blocked by Cloudflare); others were
+not tried. No audio device on this VM: sound output is unverified.
+
+## Upstream dependency (startup crash) — fixed (2026-11-17)
+
+nsh-platform-gpui 0.4 built a web view inside `prepaint` while GPUI held the
+app; WebView2 creation pumps messages; a queued GPUI task re-borrowed the app:
+`RefCell already borrowed` (gpui-fast `async_context.rs:178`), exit
+0xC0000409. The CI-built zip died at startup (e.g. run 43907524657: `exited
+early with code -1073740791`).
+
+Fixed in `d38995a`: the app builds on nsh 0.5.1 and gpui-fast 0.1.16, nsh
+taken from `hexuria/nsh` branch `rustflix-0.5.1`, which carries
+longbridge/nsh#2116 (Windows builds web views outside the app borrow; merged
+after 0.5.1). CI run 43983210923: the windows-latest smoke test is `still
+running after 15 s` with both of its web views made; locally, no
+`RefCell already borrowed` at start (dozens before). The smoke step fails
+the job again.
+
+longbridge/gpui-fast#145 (defers GPUI messages that call into the app while
+it is borrowed, also from OS modal loops) is still open; it is no longer
+needed for the start. Local runs use gpui-fast 0.1.16 with #145, #149 and
+#150 applied (`C:\work\.cargo\config.toml`, **outside this repo**).
+
+## Milestone 1 — it starts — DONE (with the local patch)
+
+- `cargo build` of this branch + patched gpui-fast: the window opens, Home
+  loads (hero, Trending, Now Playing), no panic.
+- Driven for minutes with injected input: Home ↔ Search ↔ Settings ↔
+  Downloads, scrolling, search typing, Details, Play. Process stays up and
+  responding. Screenshots: `C:\tools\shots\m1-start.png`, `m2-*.png`.
+- Release builds are GUI-subsystem programs (no console window); debug
+  builds keep the console for logs.
+
+- **Timed run (release, 2026-11-16):** 130.7 s of continuous injected
+  navigation — Search (typed "fallout", results), Settings → Downloads,
+  Downloads, Home with scrolling, back and forth — process alive and
+  responding afterwards, 0 panics in the log (`m1-nav-*.png`).
+
+## Milestone 2 — the interface with the web-page player — DONE
+
+- Home, navigation, Search (typing + results + filter chips), Settings
+  (all panes listed), Downloads (empty state), Details all render and react.
+- **WebView2 pages were black.** GPUI's DirectComposition target is created
+  topmost (`CreateTargetForHwnd(hwnd, true)`, gpui-fast-windows
+  `directx_renderer.rs`), so it is composed above child windows, and every
+  wry web view is a child window (`WRY_WEBVIEW` → `Chrome_WidgetWin_*`). The
+  page was there (`page: video ready` in the log; child window visible at
+  the right rect) but under GPUI's picture. `src/win` sets
+  `GPUI_DISABLE_DIRECT_COMPOSITION=true` before GPUI starts (kept if the user
+  set it): GPUI then presents through a swap chain on the window, which
+  child windows draw above, as a WKWebView sits above GPUI on macOS.
+  Verified: Play → the source's page plays in the window
+  (`m2-code-play-60s.png`).
+- Known, upstream: while WebView2 is created (nested message pump inside the
+  draw), GPUI drops frame and input callbacks that find the app borrowed
+  (`ERROR RefCell already borrowed` lines, up to ~20 in ~3 s at startup in
+  some runs, none in others). Clicks in that window are lost. Fixed by
+  nsh#2116, carried since `d38995a` (none at start since).
+- Typing is slow on this VM (SendKeys waited ~1 s per key in a debug build:
+  each key re-renders the results on WARP). Not measured in release yet.
+- Downloads shows "0 KB free": `fs.space` has no Windows implementation yet
+  (Milestone 4).
+
+## Milestone 3 — native player `rustflix.video` — IMPLEMENTED (verification below)
+
+### Decoder choice (smallest install burden that meets the contract)
+
+| Option | HLS | Contract fit | Install burden | Verdict |
+|---|---|---|---|---|
+| **Media Foundation `IMFMediaEngine`** (frame-server mode) | yes: master playlist, rendition switches (`FORMATCHANGE`) | HTML5-like events (load, seeked, waiting, ended, error with codes); audio streams via `IMFMediaEngineEx`; WebVTT renditions via `IMFTimedText` with cue start/duration/text; rate, volume, mute, `GetBuffered` | **none**: part of Windows (desktop editions; Server with Desktop Experience; N editions need the Media Feature Pack) | **chosen** |
+| WinRT `MediaPlayer` + `AdaptiveMediaSource` | yes | frame server works, but less control over tracks/timed text than the engine | none | not needed |
+| GStreamer (shares `src/player/linux/gst.rs`'s logic) | yes | complete | runtime + plugins installed separately (~100 MB), LGPL | rejected: install burden |
+| libmpv | yes | complete | ~120 MB DLL + `vulkan-1.dll` beside the exe | rejected: install burden |
+
+Measured here with a standalone probe (`IMFMediaEngine` + D3D11 device on
+the Basic Render Driver, no app): the mux HLS test stream loads its
+metadata in 0.6 s, plays 1920×1080 at the stream's rate (switching up to
+its 60 fps rendition); per frame `TransferVideoFrame` into a BGRA texture
+took 3–4 ms and the staging readback 4–14 ms (WARP, 1080p). Apple's
+`img_bipbop_adv_example_ts` shows its English WebVTT rendition as an
+`IMFTimedText` track whose cues arrive with start, duration and text.
+
+### Painting (what gpui-fast 0.1.10 accepts on Windows)
+
+`Window::paint_surface` (zero-copy video surfaces) is macOS/iOS-only. The
+DirectX renderer takes images through the sprite atlas (`paint_image` with
+a `RenderImage`), which is what Linux uses: each new frame is read back to
+BGRA once and uploaded once; the previous frame's tile is dropped. A 1080p
+frame is ~8 MB per upload, so the decoded size is capped to the picture's
+size on screen in pixels (and `maxResolution`): `TransferVideoFrame` scales
+on the GPU (here: WARP) before the readback.
+
+### Implementation (`src/player/win/`)
+
+- `mf.rs`: one worker thread per player owns the D3D11 device (GPU when
+  present → hardware decode, else WARP), the engine, its timed-text service
+  and the textures. Props, `sys.nativeVideo` and Media Foundation's
+  callbacks only queue messages for it; the main thread only reads the
+  newest frame from a mutex. While a frame may be due it asks
+  `OnVideoStreamTick` every 8 ms; a paused picture makes no frames and no
+  redraws (the worker then only wakes for its 4 Hz tick).
+- Events as on Linux: `ready`, `frame` (first frame), `load` (duration,
+  size, tracks), `progress` (4 Hz; `buffered`/`playable` = end of the
+  buffered range playback is in), `buffer` (WAITING/BUFFERINGSTARTED vs
+  PLAYING/BUFFERINGENDED), `seeked` (SEEKED, 5 s fallback in the tick),
+  `rate` (on pause changes), `end`, `error` (`network`/`decode`/
+  `unsupported`/`drm`/`aborted` + HRESULT), `tracks`, `cues`.
+- `startAt` goes out as the first `SetCurrentTime` once the metadata is
+  in, before `Play`; `progress` reports the target until playback is there.
+- `maxResolution` caps the decoded picture (not the rendition Media
+  Foundation picks by bandwidth). `pip`/`nowPlaying`: not on Windows.
+- `sys.nativeVideoInfo.available` probes the engine's class factory once.
+
+### Milestone 3 — verification (release build, this VM)
+
+- **HLS through the local proxy** (`dl.stream.open` → `rustflix.video`,
+  nativetest `{"stream": {...mux x36xhzz...}}`): first frame 1.0–3.0 s,
+  `load` 634.6 s with its audio track; seeks to 10 / 50 / 90 % landed
+  within 15–400 ms (`finished: true`); a forced upstream 403 → `expired` →
+  playback resumed (stall 0.4 s). Frames arrive at the stream's rate (~31/s
+  at 1080p source, decoded at the 960×540 picture); the TSX press target
+  draws over the picture (`m3-rel-a.png`, `m3-rel-b.png`: the picture
+  moves between them).
+- **Debug builds are not representative**: the proxy (rustls, unoptimised)
+  delayed the first frame to 7–12 s and the frame rate fell to 4–8/s.
+- **Paused = no redraws**: real Player screen, HLS download, pause →
+  rustflix 0.0 % of a core over 8 s; playing 480p ≈ 29 % (decode + WARP).
+- **App's own controls over the picture** (real Player screen,
+  Downloads → Play): ±10 s, play/pause, progress, speed, subtitles, volume,
+  full screen (`m4-hls-controls.png`, `m4-hls-paused.png`).
+- CPU while a 1080p HLS stream plays at 960×540: ≈ 118 % of one core
+  (Media Foundation's software decode + WARP), on 2 vCPUs.
+- Subtitle renditions: Apple's bipbop (`img_bipbop_adv_example_ts`) through
+  the local proxy: `load` lists English audio and an English subtitle track
+  (`t0`); `selectSubtitle t0` → `tracks` with `t0` selected → `cues`
+  `{time: 0.008, lines: ["Subtitles: Bip!"]}` (nativetest `trackSelect`).
+- **Real sources not tested with the native player**: the resolver finds
+  no stream link on Windows yet (`candidates=0`): its hidden web view keeps
+  a 200×200 viewport and its media sniffer runs only in the main frame.
+  Both need the web-view hook of Milestone 5.
+- Not verifiable here: sound (no audio device on this VM), hardware decode
+  (no GPU).
+
+## Milestone 4 — downloads — DONE (in-app downloading of a title: not tested)
+
+- **Finished downloads play** in `rustflix.video` from the downloader's
+  127.0.0.1 server (`local: true`): nativetest `{"playdownload": 1}` (mp4)
+  and `{"playdownload": 2}` (HLS: `index.m3u8` + segments) go through the
+  real Downloads → Play path; phase `playing` in ~3.5 s, title bar shows the
+  downloaded mark (`m4-playdl-mp4.png`). The two records were made by hand
+  (folder + `.rustflix-download` marker + `rustflix-downloads.json` entry),
+  as a finished download leaves them.
+- **`fs.space`**: `GetDiskFreeSpaceExW` (`src/win/shell.rs`). Downloads
+  shows "4.1 MB used · 18 GB free" (`m4-downloads.png`).
+- **Reveal in Explorer**: `SHOpenFolderAndSelectItems` (the old
+  `explorer /select,…` broke on paths with spaces). Row menu → Show in
+  folder opened the record folder with the file selected (`m4-reveal.png`).
+- **Recycle Bin**: `IFileOperation` with `FOFX_RECYCLEONDELETE`, no UI. A
+  progress sink refuses any item the shell would delete for good instead
+  (its `PreDeleteItem` lacks `TSF_DELETE_RECYCLE_IF_POSSIBLE`), like the
+  Linux Trash never falling back to deleting. Before this, Windows deleted
+  permanently. Verified: row menu → Delete download → "dl: #1 removed
+  (folder trashed: true)", the folder in the Recycle Bin with its original
+  location; `trash_recycles` / `trash_refuses_where_it_would_delete`
+  (ignored tests, run by hand: a file on `\\localhost\C$` stays).
+- **Default download folder**: `dl` took the home folder from `HOME`, which
+  Windows programs do not have, so it was the *relative* `Downloads\rustflix`
+  (under whatever the working directory was). Now `USERPROFILE` on Windows;
+  a relative folder stored by such a build falls back to the default.
+- **Forbidden download folders** on Windows: `SystemRoot`, the Program
+  Files folders, `ProgramData`, `%USERPROFILE%\AppData`, the Recycle Bin and
+  the app's own folder (the Unix list does not apply).
+- **Path checks**: in a verbatim Windows path (`\\?\C:\…`, what
+  `canonicalize` returns) `/` is no separator, so `a/../b` was one
+  component that slipped past the `..` check and `PathBuf::push` then
+  resolved — out of the download folder. `files::inside` and
+  `folder::validate` now refuse such components (no change on Unix,
+  where no component holds a `/`).
+- `cargo test` on Windows: 95 passed (3 tests had Unix-only assumptions;
+  fixed for both).
+- Not tested: downloading a title in the app (the resolver needs Milestone
+  5 first); the downloader's own tests (local HTTP server, HLS, resume) pass.
+
+## Milestone 5 — ad and pop-up blocking for web views — DONE
+
+**Reaching WebView2.** wry builds every web view's controller itself, NSH
+keeps the `wry::WebView`, and wry's `WRY_WEBVIEW` window stores no pointer
+to it, so the controller cannot be found from the window. Options weighed:
+
+| Option | Verdict |
+|---|---|
+| Patch WebView2's own entry point (`ICoreWebView2Environment10::CreateCoreWebView2ControllerWithOptions`, + the base `CreateCoreWebView2Controller`) in the environment class's COM vtable, at startup | **chosen**: the Windows twin of the macOS guard's WebKit method hooks; COM vtable layouts are a fixed ABI and the class's vtable is shared by every environment of the loaded runtime; each controller is set up before wry gets it, before its first navigation |
+| Chromium DevTools protocol (`--remote-debugging-port` via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`) | rejected: opens a local port that any process could drive (cookies included) |
+| A hook in NSH (hand the host each `wry::WebView`) | the proper long-term fix; needs an upstream change |
+
+`src/win/webview.rs`: `install()` (after logging starts, before GPUI) makes a
+throwaway environment in its own temp profile and replaces the two vtable
+slots (4 ms here). The replacement wraps wry's completion handler; for each
+new controller `adopt` adds, then hands it on:
+
+- the guard script (`adblock.ts` GUARD_JS + the media sniffer) with
+  `AddScriptToExecuteOnDocumentCreated` — it runs in child frames too (the
+  resolver's sniffer reports streams from the embed's frames);
+- a `WebResourceRequested` filter over every frame's requests
+  (`AddWebResourceRequestedFilterWithRequestSourceKinds`): the WebKit
+  content rules `sys.webGuard` sends (`rules`, `resolverRules` for the
+  marked resolver) compiled to one `RegexSet` each, evaluated in order (last
+  match wins; `ignore-previous-rules`), `resource-type`/`load-type` as WebKit
+  does; a blocked request gets a 403;
+- `NewWindowRequested` → handled (no pop-up windows, as on macOS);
+- `NavigationStarting` (main frame) → `webguard::verdict`, the same rule as
+  macOS (embed hosts, the site shown, its redirects while pending until
+  `ContentLoading`); `FrameNavigationStarting` → no non-web schemes;
+- camera/microphone permission requests → denied while on.
+
+`markResolver` finds the resolver's view by its document title, applies the
+resolver rules and gives it a real viewport: its `WRY_WEBVIEW` window is
+sized 1600×900 and clipped to a 1×1 window region, the controller made
+visible (NSH never places a view with no geometry, so it kept its 200×200
+creation size — the Linux symptom, `candidates=0`). `sys.webCookies` reads
+the profile's cookie manager (HttpOnly included); `sys.webViews` and
+`sys.webBackground` work on Windows too.
+
+Verified (release build, real source "vidfast", this VM):
+
+- Hook in 4 ms; the guard took both web views; the resolver was marked.
+- **Native playback of a real title**: the resolver found the HLS master in
+  ~16 s (`candidates=2`, "via xhr from https://vidfast.vc" — the sniffer
+  running in the embed's frames); `rustflix.video` played it through the
+  local proxy from the stored resume point (`m5-full.png`: the app's own
+  window, no web page). The 1080p stream saturates both vCPUs here (WARP:
+  GPUI's redraw + Media Foundation's colour conversion on the CPU).
+- **Web-page player** (`rustflix.nativeplayer` = "0"): the source's page
+  plays; 17 requests to ad/tracker hosts blocked in the first ~40 s
+  (googletagmanager, cloudflareinsights, three throwaway ad domains); clicks
+  on the page opened no window.
+- Not exercised: a refused main-frame navigation (none attempted in the
+  runs); `sys.webCookies` output not inspected yet.
+
+## Milestone 6 — the remaining host calls — DONE
+
+- **`sys.pickFolder`**: `IFileOpenDialog` with `FOS_PICKFOLDERS`, modal to the app
+  window, starting in the current folder; `{ok, path}` / `{ok, cancelled}` as on
+  Linux (`src/win/shell.rs`). Verified: Settings → Downloads → Change… → the
+  system picker → Videos → "Move 1 download?" → moved (`m6-picker.png`,
+  `m6-pick-b.png`); Use default moved it back.
+- **`cache.clear` of web data**: the web views' WebView2 profile now lives in
+  `%LOCALAPPDATA%\com.hexuria.rustflix\WebView2` (`WEBVIEW2_USER_DATA_FOLDER`,
+  set after the hook's probe; a value the user set wins). WebView2's default
+  is a folder beside the executable, which fails where that is read-only
+  (Program Files). `cache.info` measures `…\EBWebView\Default\Cache` (video
+  pages) and `…\Default` (site data); `cache.clear` goes through the live
+  profile (`ICoreWebView2Profile2::ClearBrowsingData`: disk cache + cache
+  storage; site data: all site kinds + disk cache), as macOS goes through
+  `WKWebsiteDataStore`. Verified: Storage & privacy showed 8.9 MB / 1.6 MB /
+  4.4 MB; Clear → "Cleared 1.1 MB of video page files" (`m6-cleared.png`).
+- **`sys.focusContent`**: keyboard focus back to the app's GPUI window
+  (`SetFocus`) after a web view (a child window) held it. Implemented, not
+  exercised by a test.
+- `sys.webViews`, `sys.webBackground`: Windows versions (milestone 5).
+- **TSX** (`platform.os` gated): `app/lib/system.ts` asks the `sys.*` calls on
+  Windows too (they were macOS/Linux only); `app/lib/downloads.ts` takes
+  Windows folder paths (drive or UNC; `\\` separators) in `changeDownloadDir`,
+  which only accepted paths starting with `/`.
+- **Download folder paths**: `folder::validate` canonicalises, which on Windows
+  gives verbatim paths (`\\?\C:\…`) — they reached the settings and the records.
+  The folder is now kept in its plain form (and a stored verbatim one is
+  read back plain).
+- Still not on Windows: the FPS monitor's native panel (`src/perf`, a macOS
+  developer tool).
+
+## Milestone 7 — window — DONE
+
+Verified with injected mouse input on this VM (`m7-*.png`):
+
+- **Caption buttons**: minimize (iconic), maximize ↔ restore, close (the
+  process exits; GPUI logs three teardown errors on the way out —
+  "window not found", "Class not registered", "Invalid window handle").
+- **Dragging, Snap, double click** were broken: NSH marks its `windowDrag`
+  views as caption (`HTCAPTION`), but its drag area also handles the press
+  (`stop_propagation`, nsh-platform-gpui `chrome.rs` `drag_area`), so gpui-fast
+  reports it handled and `DefWindowProc` never sees it; NSH's fallback
+  `start_window_move` does nothing on Windows and its double click only
+  maximizes (`zoom_window`). nsh 0.5 lets the press through on Windows
+  itself (longbridge/nsh#1525), so `DefWindowProc` moves the window; the
+  subclass this branch had for it (`src/win/window.rs`) went in `d38995a`.
+  Re-checked on nsh 0.5.1: dragging the title bar moves the window and a
+  double click maximizes and restores it. Before (with the subclass): the title bar drags the window;
+  dragging to the top edge maximizes (Aero Snap); dragging a maximized
+  window restores it; Win+← snaps to the left half; a double click toggles
+  maximize. The title bar's own buttons (back/forward) still work.
+- **Full screen**: the player's full-screen button fills the screen
+  (`0,0–1920,1080`, over the taskbar) and restores the window.
+- **Keyboard**: player shortcuts reach the app — `m` muted the native player
+  (Media Foundation VOLUMECHANGE) once the window was activated. The test
+  input can only activate the window with an Alt tap, which also enters
+  NSH's Windows menu-bar mode.
+- **Open**: `Esc` ("dismiss": closes the player on macOS) did not close the
+  player in three injected attempts, in or out of full screen; whether the
+  Alt-tap menu mode or the app swallows it is not determined. Full screen is
+  left with the player's button (verified) — the goal's milestone does not
+  depend on `Esc`, but this needs a check with a real keyboard.
+- **Not available here**: Snap Layouts (the Windows 11 flyout on the maximize
+  button; this is a Windows 10–based Server — the maximize button answers
+  `HTMAXBUTTON`, which is what Windows 11 needs).
+- Reported upstream: longbridge/nsh#2143 (`drag_area` should let caption
+  presses through on Windows).
+
+## Milestone 8 — package — DONE
+
+- `desktop-ports.yml` (windows-latest) now uploads `rustflix-windows-x86_64.zip`:
+  `rustflix.exe` (GUI subsystem, release), `nsh/` (the TSX bundle) and
+  `README.txt` (`packaging/windows/README.txt`: requirements — Windows 10 1809+
+  / 11 x64, the WebView2 runtime with where to get it, Media Foundation /
+  the Media Feature Pack on N editions; where the app keeps its data; not
+  signed yet). No installer, no signing (as asked).
+- Verified locally with the same layout: the folder copied to the Desktop
+  and the zip expanded run as is; no console window; WebView2's profile goes
+  to `%LOCALAPPDATA%\com.hexuria.rustflix\WebView2`, nothing is written beside
+  the executable.
+- The CI-built zip starts since `d38995a` (nsh 0.5.1 with longbridge/nsh#2116,
+  gpui-fast 0.1.16): see "Upstream dependency (startup crash)" above. The
+  verifications above this note used gpui-fast 0.1.10 with #145 backported.
+- No extra DLLs: Media Foundation and WebView2 are Windows'.
+
+## Performance on a machine without a GPU (2026-11-16)
+
+Measured on the VM (Windows Server 2022, 2 vCPU, no GPU: Direct3D 11 runs on
+WARP, the CPU rasterizer), release build, after the first screen settled
+(loading Home keeps both CPUs busy for ~40 s; earlier numbers are polluted).
+
+- **Cause.** NSH paints a frame in < 1 ms and GPUI encodes it in 0.5 ms;
+  WARP then shaded ~300 ms per frame (3–5 fps while scrolling). Switching
+  primitive kinds off one at a time showed it was quads: **overdraw**, the
+  quads covered 5.7× the window per frame (window, content area, page and
+  pages kept under the one shown, each an opaque full-size background).
+  Shader complexity and clip distances were ruled out by experiment.
+- **gpui-fast: overdraw culling** (draft longbridge/gpui-fast#149; local
+  patch here). Primitives a later opaque rectangle or opaque image hides are
+  not drawn; partly covered plain quads are drawn as their uncovered pieces.
+  Pixel tests compare culled and whole drawing byte for byte.
+  Home scrolling (re-measured at the PR's head `ea0bf1f`, 3 runs): quads
+  5.7× → 1.64× the window (+ 0.58× images), `Present` ~300 → 99–104 ms,
+  CPU 165% → 81–106%. Player painted as a GPUI image: quads 1.04× → 0.11×,
+  23.7–24.0 frames painted a second at ~110% CPU.
+- **rustflix: video frames through the CPU** (`src/player/win/wic.rs`).
+  On the Basic Render Driver the media engine converted each frame on WARP:
+  60–90 ms for a 640×360 frame (~8 fps shown). Without a DXGI manager the
+  engine decodes in software and transfers into a WIC bitmap: ~1 ms a frame.
+  `RUSTFLIX_MF_SOFTWARE=1/0` forces the path; with a GPU the Direct3D path
+  (hardware decode) stays.
+- **Video result** (same 10 s 30 fps 360p file Edge plays; Downloads → Play):
+  frames decoded 8 → 30 per second; painted ~2 → **23.1–25.7** per second
+  with the window focused (8 runs, median ≈ 24; ~23 unfocused, where GPUI
+  draws at 30 Hz); 10 s of media in 10 s; ~105–115% CPU playing, 0%
+  paused; subtitles (bipbop `t0`: "Subtitles: Bip!"), controls over the
+  picture and the web-page player checked.
+- **What limits video now** (measured): putting each frame into GPUI's
+  sprite atlas (`paint_image`) waits 8–21 ms for WARP to finish with the
+  atlas texture the previous frame draws from (p50 0.5 ms, p90 34 ms per
+  paint). gpui-fast 0.1.10's atlas has no path for an image that changes
+  every frame. Moving the upload off the CPU's path (a texture made with
+  the pixels and a queued copy, tried in the local patch) removed that wait
+  but not the ceiling (22.9–23.9 fps over 4 runs): the frame rate is bounded
+  by WARP drawing each frame (~40 ms, mostly the full-window picture). Past
+  it, the picture has to be composed outside GPUI's frame (Media Foundation
+  into a DirectComposition surface under a transparent GPUI base), which
+  needs gpui-fast (a non-topmost composition target, so WebView2 child
+  windows stay visible; an external surface below the base) and NSH (a
+  transparent window; pages under the player not painted) — not done.
+- **Next, prototyped only** (`C:\tools\perf-p3.md`, not in any repo):
+  partial redraw of scrolled frames in the renderer (copy the previous frame
+  shifted, draw only the exposed strip and what changed, scissored): Home
+  scrolling `Present` 97 → **19 ms**, CPU 102% → 17%, checked against whole
+  drawing (within 2/255: image sampling rounds differently after a move).
+  Needs a design upstream (scroll hints from NSH, translation-invariant
+  sprite sampling) before it can ship.
+- **Video outside GPUI's frame** (`src/player/win/direct.rs`, software
+  adapters only; `RUSTFLIX_DIRECT_VIDEO=1/0` forces it). Profiling showed the
+  picture drawn through GPUI costs ~50–60 points of CPU on WARP whatever
+  the shader (fast path, no blending, no clip planes: no gain), while a
+  flip-model swap chain of the video's own size in a child window,
+  stretched by the compositor, costs ~0 % in the app and ~14 % in dwm
+  (standalone probe, 640×360 → 1440×810 at 30 fps). While the app says
+  nothing is drawn over the picture (`sys.nativeVideo {uncovered}`: playing,
+  no controls, popup, caption, skip button or dialog), frames go to that
+  child window and GPUI draws nothing; the moment something must be over
+  the picture, the frame on screen goes back to GPUI and the window hides.
+  The mouse passes through the window. Measured on the 848×480 HLS
+  download: every decoded frame shown (53 of 53 per second; 16–25 before),
+  app CPU ~135–160 % → ~60 % (+ dwm ~40 % at that frame rate).
+  Captions: while the picture is in its window, the player draws the app's
+  caption itself in a layered child window above it (`CaptionWindow`: GDI
+  text into a bitmap with per-pixel alpha; white, semibold, the app's soft
+  shadow; a line is italic when all of it is), from
+  `sys.nativeVideo {caption}`. Verified end to end: cues given to the app's
+  caption component show in that window and change with each cue while the
+  picture stays in its window (67 % app CPU).
+  The app draws none of its own meanwhile (the component's `caption`
+  event, `nativeCaptionShown`): the picture's window hides the app's caption
+  only where the picture is, so beside a letterboxed picture, or across its
+  edge, both showed, a few pixels apart (fixed 2026-11-17).
+  Known, upstream (until `d38995a`): gpui-fast 0.1.10 panicked (`RefCell
+  already borrowed`, `async_context.rs`) when a hit-test message reached it
+  inside WebView2's creation pump (seen once). gpui-fast 0.1.16 defers those
+  callbacks (#146), and nsh#2116 builds web views outside the pump.
+  Limits: controls put the picture back on the GPUI path while they show; a
+  cropped picture (`fit: cover`) stays on it; a line mixing italic and
+  upright text is drawn upright.
+- On any machine with a GPU none of this is visible: the app's own work per
+  frame is ~1.5 ms.

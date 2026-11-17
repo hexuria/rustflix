@@ -6,6 +6,10 @@
 //! TMDB client, library storage, the WebView/Video player). The host
 //! only chooses the window and serves `nsh/base`.
 
+// Windows: a release build is a GUI program (no console window opens
+// beside it); a debug build keeps its console for the logs.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 
 use nsh_engine::HostChannel;
@@ -16,6 +20,8 @@ mod appkit;
 mod webguard;
 #[cfg(target_os = "linux")]
 mod webkitgtk;
+#[cfg(target_os = "windows")]
+mod win;
 mod perf;
 mod player;
 mod stream;
@@ -59,9 +65,15 @@ fn bundle_path() -> PathBuf {
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(target_os = "windows")]
+    win::before_gpui();
     // env_logger, with the engine's `nsh::perf` lines going to the perf
     // recorder (src/perf.rs) instead of stderr.
     perf::init_logging();
+    // Windows: WebView2's controller creation hooked before any web view
+    // exists (src/win/webview.rs), once logging is up.
+    #[cfg(target_os = "windows")]
+    win::webview::install();
 
     // SAFETY: the bundle is this app's own build output (`build.rs`), or
     // one its developer names, the same trust as the app's resources.
@@ -190,13 +202,23 @@ mod cache {
                 _ => env("XDG_CACHE_HOME").or_else(|| home.as_ref().map(|h| h.join(".cache"))),
             };
             let mac_home = home.filter(|_| own && os == "macos");
+            // Windows: the WebView2 profile the web views use
+            // (src/win/webview.rs: `%LOCALAPPDATA%\<id>\WebView2`); its cache,
+            // and the whole profile (cookies, storage) as site data.
+            let profile = caches
+                .as_ref()
+                .filter(|_| own && os == "windows")
+                .map(|c| c.join(id).join("WebView2").join("EBWebView").join("Default"));
             Paths {
                 app_id: id.to_owned(),
                 images: caches.filter(|_| own).map(|c| c.join(id).join("images")),
                 web: mac_home
                     .as_ref()
-                    .map(|h| h.join("Library/Caches").join(id).join("WebKit")),
-                site: mac_home.map(|h| h.join("Library/WebKit").join(id).join("WebsiteData")),
+                    .map(|h| h.join("Library/Caches").join(id).join("WebKit"))
+                    .or_else(|| profile.as_ref().map(|p| p.join("Cache"))),
+                site: mac_home
+                    .map(|h| h.join("Library/WebKit").join(id).join("WebsiteData"))
+                    .or(profile),
             }
         }
 
@@ -263,6 +285,11 @@ mod cache {
             let before = dir_size(dir);
             if webkit::remove(&paths.app_id, what == What::Site) {
                 return before.saturating_sub(dir_size(dir));
+            }
+            // A store the web engine has open is not deleted under it.
+            if webkit::in_use(dir) {
+                log::warn!("cache: {} is in use and the web engine did not clear it; left as it is", dir.display());
+                return 0;
             }
         }
         clear_dir(dir)
@@ -371,11 +398,38 @@ mod cache {
                 }
             }
         }
+
+        /// Unchanged on macOS: the walk deletes what WebKit left.
+        pub(super) fn in_use(_dir: &std::path::Path) -> bool {
+            false
+        }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Windows: the live WebView2 profile (`ClearBrowsingData`).
+    #[cfg(target_os = "windows")]
+    mod webkit {
+        pub(super) fn remove(_app_id: &str, all: bool) -> bool {
+            let ok = crate::win::webview::clear_browsing_data(all);
+            if ok {
+                // WebView2's processes finish deleting files after it answers.
+                std::thread::sleep(super::SETTLE);
+            }
+            ok
+        }
+
+        /// Whether a WebView2 browser has the profile holding `dir` open.
+        pub(super) fn in_use(dir: &std::path::Path) -> bool {
+            crate::win::webview::profile_in_use(dir)
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     mod webkit {
         pub(super) fn remove(_app_id: &str, _all: bool) -> bool {
+            false
+        }
+
+        pub(super) fn in_use(_dir: &std::path::Path) -> bool {
             false
         }
     }
@@ -504,11 +558,13 @@ mod files {
         if !dir.is_absolute() || !path.is_absolute() {
             return None;
         }
-        if path
-            .components()
-            .chain(dir.components())
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
+        // In a verbatim Windows path (`\\?\C:\…`) `/` is no separator:
+        // `a/../b` is then one component, which `PathBuf::push` resolves —
+        // out of `dir`. On other systems no component holds a `/`.
+        let dotted = |n: &std::ffi::OsStr| n.as_encoded_bytes().split(|b| *b == b'/').any(|s| s == b".." || s == b".");
+        if path.components().chain(dir.components()).any(|c| {
+            matches!(c, Component::ParentDir | Component::CurDir) || matches!(c, Component::Normal(n) if dotted(n))
+        }) {
             return None;
         }
         let canon = fs::canonicalize(dir).ok()?;
@@ -576,7 +632,12 @@ mod files {
         Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn statvfs_free(dir: &Path) -> Option<u64> {
+        crate::win::shell::free_space(dir)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn statvfs_free(_dir: &Path) -> Option<u64> {
         None
     }
@@ -750,7 +811,13 @@ mod files {
         }
     }
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+    /// The Recycle Bin (never a permanent delete) and Explorer.
+    #[cfg(target_os = "windows")]
+    mod os {
+        pub(super) use crate::win::shell::{reveal, trash};
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "windows")))]
     mod os {
         use std::path::Path;
 
@@ -764,15 +831,10 @@ mod files {
         }
 
         pub(super) fn reveal(path: &Path) -> bool {
-            #[cfg(windows)]
-            let r = std::process::Command::new("explorer")
-                .arg(format!("/select,{}", path.display()))
-                .spawn();
-            #[cfg(not(windows))]
-            let r = std::process::Command::new("xdg-open")
+            std::process::Command::new("xdg-open")
                 .arg(path.parent().unwrap_or(path))
-                .spawn();
-            r.is_ok()
+                .spawn()
+                .is_ok()
         }
     }
 
@@ -828,7 +890,13 @@ mod files {
             assert_eq!(inside(&dir, &dir), None);
             assert_eq!(inside(&dir, Path::new("/etc/hosts")), None);
             assert_eq!(inside(&dir, Path::new("a.mp4")), None);
-            assert_eq!(inside(&dir, &dir.join("sub/../a.mp4")), None);
+            // Built as a string: on Windows `dir` is verbatim (canonical) and
+            // `join` would resolve the `..` before `inside` sees it.
+            let sep = std::path::MAIN_SEPARATOR_STR;
+            assert_eq!(inside(&dir, &PathBuf::from(format!("{}{sep}sub{sep}..{sep}a.mp4", dir.display()))), None);
+            // Verbatim Windows paths: `/` is no separator there.
+            #[cfg(windows)]
+            assert_eq!(inside(&dir, &PathBuf::from(format!(r"{}\sub/../../x", dir.display()))), None);
             assert_eq!(inside(&dir, &dir.join("../x")), None);
             // A sibling folder whose name starts with the folder's.
             let sib = PathBuf::from(format!("{}-other", dir.display()));

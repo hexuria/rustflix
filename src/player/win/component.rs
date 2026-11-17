@@ -15,7 +15,12 @@
 //! The picture's size on screen, in pixels, is the player's default decode
 //! cap: it is sent whenever the `frame` rect or the window's scale changes.
 
-use std::{cell::RefCell, panic::AssertUnwindSafe, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    panic::AssertUnwindSafe,
+    rc::Rc,
+    sync::Arc,
+};
 
 use nsh_platform_gpui::{
     ComponentContext, NativeComponent,
@@ -66,6 +71,8 @@ pub(crate) struct Video {
     /// be made (the picture then stays GPUI's while a caption shows).
     captions: Option<Rc<RefCell<direct::CaptionWindow>>>,
     captions_failed: bool,
+    /// Tells the app whether the captions' window shows its caption.
+    caption_shown: Rc<CaptionShown>,
     /// The picture's window failed: not tried again before this.
     direct_retry: Option<std::time::Instant>,
 }
@@ -81,6 +88,7 @@ impl Video {
         // Its handle, for `sys.nativeVideo` (props wait for a frame of the
         // window; that op does not).
         cx.emit("ready", json!({ "handle": player.handle() }));
+        let caption_shown = Rc::new(CaptionShown { cx: cx.clone(), shown: Cell::new(false) });
         Video {
             cx,
             player,
@@ -93,6 +101,7 @@ impl Video {
             hide_pending: false,
             captions: None,
             captions_failed: false,
+            caption_shown,
             direct_retry: None,
         }
     }
@@ -172,6 +181,23 @@ impl Video {
 /// How long the picture stays in the app's drawing after its window failed.
 const DIRECT_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Whether the captions' window shows the app's caption, told to the app
+/// (`caption` {shown}) as it changes: the app draws none of its own
+/// meanwhile. The app's own is under the picture's window but shows beside
+/// the picture, or across its edge, where the two would double.
+struct CaptionShown {
+    cx: ComponentContext,
+    shown: Cell<bool>,
+}
+
+impl CaptionShown {
+    fn set(&self, shown: bool) {
+        if self.shown.replace(shown) != shown {
+            self.cx.emit("caption", json!({ "shown": shown }));
+        }
+    }
+}
+
 fn num(v: Option<&JsonValue>, key: &str) -> f32 {
     v.and_then(|v| v.get(key)).and_then(JsonValue::as_f64).filter(|n| n.is_finite()).unwrap_or(0.0) as f32
 }
@@ -186,6 +212,7 @@ struct FrameElement {
     place: Option<(Rc<RefCell<direct::Window>>, (u32, u32))>,
     /// The captions' window and what it shows over the picture's window.
     caption: Option<(Rc<RefCell<direct::CaptionWindow>>, Option<direct::Caption>)>,
+    caption_shown: Rc<CaptionShown>,
     drop: Option<Arc<gpui::RenderImage>>,
     object_fit: ObjectFit,
     style: StyleRefinement,
@@ -266,6 +293,7 @@ impl Element for FrameElement {
                 Some(caption) => captions.borrow_mut().show(&caption, area, scale),
                 None => captions.borrow_mut().hide(),
             }
+            self.caption_shown.set(captions.borrow().showing());
         }
         let Some(image) = self.image.clone() else { return };
         if image.frame_count() == 0 {
@@ -290,6 +318,7 @@ impl NativeComponent for Video {
             if let Some(captions) = &self.captions {
                 captions.borrow_mut().hide();
             }
+            self.caption_shown.set(false);
             self.set_direct(false);
             self.hide_direct(false);
             return None;
@@ -330,6 +359,7 @@ impl NativeComponent for Video {
             if let Some(captions) = &captions {
                 captions.borrow_mut().hide();
             }
+            self.caption_shown.set(false);
             let image = self.shown_image();
             self.hide_direct(image.is_some());
             (Some(image?), None, None)
@@ -337,7 +367,7 @@ impl NativeComponent for Video {
         // The element itself carries the frame rect: a child with default
         // style would lay out 0x0 and paint nothing.
         Some(
-            FrameElement { image, place, caption, drop: self.retired.take(), object_fit: fit, style: StyleRefinement::default() }
+            FrameElement { image, place, caption, caption_shown: self.caption_shown.clone(), drop: self.retired.take(), object_fit: fit, style: StyleRefinement::default() }
                 .absolute()
                 .left(px(f.x))
                 .top(px(f.y))

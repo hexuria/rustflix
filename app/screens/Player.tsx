@@ -240,6 +240,7 @@ function NativeStage(props: { mobile: boolean }) {
         onPip={nativeHandlers.onPip}
         onEnd={nativeHandlers.onEnd}
         onError={nativeHandlers.onError}
+        onCaption={nativeHandlers.onCaption}
       />
       <Captions mobile={props.mobile} size={() => size()} />
     </View>

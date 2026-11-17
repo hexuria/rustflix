@@ -750,6 +750,10 @@ WARP, the CPU rasterizer), release build, after the first screen settled
   `sys.nativeVideo {caption}`. Verified end to end: cues given to the app's
   caption component show in that window and change with each cue while the
   picture stays in its window (67 % app CPU).
+  The app draws none of its own meanwhile (the component's `caption`
+  event, `nativeCaptionShown`): the picture's window hides the app's caption
+  only where the picture is, so beside a letterboxed picture, or across its
+  edge, both showed, a few pixels apart (fixed 2026-11-17).
   Known, upstream (until `d38995a`): gpui-fast 0.1.10 panicked (`RefCell
   already borrowed`, `async_context.rs`) when a hit-test message reached it
   inside WebView2's creation pump (seen once). gpui-fast 0.1.16 defers those

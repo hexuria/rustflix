@@ -315,6 +315,11 @@ impl CaptionWindow {
         }
     }
 
+    /// Whether it shows a caption now.
+    pub(crate) fn showing(&self) -> bool {
+        self.shown.is_some()
+    }
+
     /// Back above the picture's window (which went to the top as it moved).
     pub(crate) fn raise(&self) {
         if self.shown.is_some() {
